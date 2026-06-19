@@ -1,0 +1,285 @@
+<Window x:Class="CyrusIptv.Windows.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vlc="clr-namespace:LibVLCSharp.WPF;assembly=LibVLCSharp.WPF"
+        Title="Cyrus IPTV Modern"
+        Width="1480" Height="900"
+        MinWidth="1040" MinHeight="680"
+        WindowStartupLocation="CenterScreen"
+        WindowState="Maximized"
+        Background="{StaticResource Bg0Brush}"
+        KeyDown="Window_KeyDown"
+        MouseMove="Window_MouseMove">
+    <Grid x:Name="RootGrid">
+        <Grid.RowDefinitions>
+            <RowDefinition x:Name="TopMenuRow" Height="48" />
+            <RowDefinition x:Name="ContentRow" Height="*" />
+            <RowDefinition x:Name="StatusRow" Height="28" />
+        </Grid.RowDefinitions>
+
+        <Menu x:Name="AppMenu" Grid.Row="0" Background="White" Foreground="Black">
+            <MenuItem Header="Account">
+                <MenuItem Header="Information" Click="AccountInfo_Click" />
+                <Separator />
+                <MenuItem Header="Logout / Change account" Click="ChangeAccount_Click" />
+            </MenuItem>
+            <MenuItem Header="Playlist">
+                <MenuItem Header="Update playlist" Click="UpdatePlaylist_Click" />
+                <MenuItem Header="Clear cache" Click="ClearCache_Click" />
+            </MenuItem>
+            <MenuItem Header="View">
+                <MenuItem Header="Show / hide channels   Ctrl+L" Click="ToggleChannels_Click" />
+                <MenuItem Header="Full screen   F11" Click="FullScreen_Click" />
+            </MenuItem>
+            <MenuItem Header="Playback">
+                <MenuItem Header="Play / pause   Space" Click="PlayPause_Click" />
+                <MenuItem Header="Stop   S" Click="Stop_Click" />
+                <MenuItem Header="Previous   Left" Click="Previous_Click" />
+                <MenuItem Header="Next   Right" Click="Next_Click" />
+                <Separator />
+                <MenuItem x:Name="GoLiveMenuItem" Header="Go live" Click="GoLive_Click" IsEnabled="False" />
+                <Separator />
+                <MenuItem Header="Restart stream" Click="RestartStream_Click" />
+                <MenuItem Header="Copy selected stream URL" Click="CopyStreamUrl_Click" />
+                <Separator />
+                <MenuItem Header="Favorite / unfavorite selected" Click="ToggleFavorite_Click" />
+            </MenuItem>
+            <MenuItem x:Name="SubtitleMenu" Header="Subtitles" />
+            <MenuItem Header="Settings">
+                <MenuItem Header="Buffer 1 sec" Click="Buffer1_Click" />
+                <MenuItem Header="Buffer 3 sec" Click="Buffer3_Click" />
+                <MenuItem Header="Buffer 6 sec" Click="Buffer6_Click" />
+                <MenuItem Header="Buffer 10 sec" Click="Buffer10_Click" />
+                <Separator />
+                <MenuItem Header="Remote control on/off" Click="ToggleRemoteControl_Click" />
+            </MenuItem>
+        </Menu>
+
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="SidebarColumn" Width="360" MinWidth="260" />
+                <ColumnDefinition x:Name="SplitterColumn" Width="5" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <Border x:Name="Sidebar" Grid.Column="0" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource StrokeBrush}" BorderThickness="0,0,1,0">
+                <Grid Margin="14">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <DockPanel Margin="0,0,0,12">
+                        <TextBlock Text="Channels" FontSize="22" FontWeight="Bold" DockPanel.Dock="Left" />
+                        <StackPanel Orientation="Horizontal" DockPanel.Dock="Right" HorizontalAlignment="Right">
+                            <Button x:Name="FolderBackButton"
+                                    Style="{StaticResource GhostButton}"
+                                    Content="Back"
+                                    Visibility="Collapsed"
+                                    Margin="0,0,10,0"
+                                    Padding="10,5"
+                                    Click="FolderBack_Click" />
+                            <TextBlock x:Name="CountText" Text="0" Foreground="{StaticResource Text2Brush}" VerticalAlignment="Center" />
+                        </StackPanel>
+                    </DockPanel>
+
+                    <Grid Grid.Row="1" Margin="0,0,0,10">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="8" />
+                            <ColumnDefinition Width="76" />
+                            <ColumnDefinition Width="6" />
+                            <ColumnDefinition Width="64" />
+                        </Grid.ColumnDefinitions>
+                        <TextBox x:Name="SearchBox" Grid.Column="0" Height="38" TextChanged="SearchBox_TextChanged" />
+                        <Button x:Name="SearchFoldersButton" Grid.Column="2" Style="{StaticResource GhostButton}" Content="Folders" ToolTip="Search folders" Click="SearchFolders_Click" />
+                        <Button x:Name="SearchItemsButton" Grid.Column="4" Style="{StaticResource GhostButton}" Content="Items" ToolTip="Search all items" Click="SearchItems_Click" />
+                    </Grid>
+
+                    <StackPanel Grid.Row="2" Margin="0,0,0,10">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="6" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="6" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="6" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Button x:Name="AllMediaButton" Grid.Column="0" Style="{StaticResource GhostButton}" Content="All media" Click="AllMedia_Click" />
+                            <Button x:Name="LiveTvButton" Grid.Column="2" Style="{StaticResource GhostButton}" Content="Live TV" Click="LiveTv_Click" />
+                            <Button x:Name="MoviesButton" Grid.Column="4" Style="{StaticResource GhostButton}" Content="Movies" Click="Movies_Click" />
+                            <Button x:Name="SeriesButton" Grid.Column="6" Style="{StaticResource GhostButton}" Content="Series" Click="Series_Click" />
+                        </Grid>
+
+                        <Grid Margin="0,8,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="6" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="6" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Button x:Name="AllViewButton" Grid.Column="0" Style="{StaticResource GhostButton}" Content="All" Click="AllView_Click" />
+                            <Button x:Name="FavoritesViewButton" Grid.Column="2" Style="{StaticResource GhostButton}" Content="Favorites" Click="FavoritesView_Click" />
+                            <Button x:Name="RecentViewButton" Grid.Column="4" Style="{StaticResource GhostButton}" Content="Recent" Click="RecentView_Click" />
+                        </Grid>
+                    </StackPanel>
+
+                    <ListBox x:Name="ChannelList" Grid.Row="3" SelectionChanged="ChannelList_SelectionChanged" MouseDoubleClick="ChannelList_MouseDoubleClick">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Margin="0,4">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="24" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <ContentControl Content="{Binding Icon}" VerticalAlignment="Center" Margin="0,0,8,0" />
+                                    <Grid Grid.Column="1">
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Grid.Row="1" Text="{Binding Group}" FontSize="12" Foreground="{StaticResource Text2Brush}" TextTrimming="CharacterEllipsis" />
+                                    </Grid>
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </Grid>
+            </Border>
+
+            <GridSplitter x:Name="SidebarSplitter" Grid.Column="1" Width="5" HorizontalAlignment="Stretch" Background="{StaticResource StrokeBrush}" />
+
+            <Grid x:Name="PlayerGrid" Grid.Column="2" Background="Black">
+                <Grid.RowDefinitions>
+                    <RowDefinition x:Name="VideoRow" Height="*" />
+                    <RowDefinition x:Name="ControlsRow" Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <Border x:Name="VideoHost" Background="Black" MouseLeftButtonDown="VideoHost_MouseLeftButtonDown">
+                    <Border.ContextMenu>
+                        <ContextMenu>
+                            <MenuItem Header="Play / Pause" Click="PlayPause_Click" />
+                            <MenuItem Header="Stop" Click="Stop_Click" />
+                            <MenuItem Header="Previous" Click="Previous_Click" />
+                            <MenuItem Header="Next" Click="Next_Click" />
+                            <Separator />
+                            <MenuItem Header="Full screen" Click="FullScreen_Click" />
+                            <MenuItem x:Name="VideoGoLiveMenuItem" Header="Go live" Click="GoLive_Click" IsEnabled="False" />
+                            <MenuItem Header="Restart stream" Click="RestartStream_Click" />
+                            <MenuItem Header="Copy stream URL" Click="CopyStreamUrl_Click" />
+                            <MenuItem Header="Favorite / unfavorite" Click="ToggleFavorite_Click" />
+                            <Separator />
+                            <MenuItem x:Name="VideoSubtitleMenu" Header="Subtitles" />
+                            <Separator />
+                            <MenuItem Header="Show stream information" Click="ShowStreamInfo_Click" />
+                        </ContextMenu>
+                    </Border.ContextMenu>
+                    <vlc:VideoView x:Name="VideoView" Background="Black" />
+                </Border>
+
+                <Popup x:Name="VolumeOsdPopup"
+                       PlacementTarget="{Binding ElementName=VideoHost}"
+                       Placement="Center"
+                       AllowsTransparency="True"
+                       StaysOpen="True"
+                       IsHitTestVisible="False">
+                    <Border Background="#DD000000"
+                            BorderBrush="#66FFFFFF"
+                            BorderThickness="1"
+                            CornerRadius="6"
+                            Padding="22,12">
+                        <TextBlock x:Name="VolumeOsdText"
+                                   Text="Volume 100%"
+                                   Foreground="White"
+                                   FontSize="22"
+                                   FontWeight="SemiBold" />
+                    </Border>
+                </Popup>
+
+                <Popup x:Name="FullScreenControlsPopup"
+                       PlacementTarget="{Binding ElementName=VideoHost}"
+                       Placement="Relative"
+                       AllowsTransparency="True"
+                       StaysOpen="True" />
+
+                <Border x:Name="ControlsBar" Grid.Row="1" Background="White" BorderBrush="{StaticResource StrokeBrush}" BorderThickness="1,1,0,0" Padding="12" MouseEnter="ControlsBar_MouseEnter">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <Slider x:Name="SeekSlider" Minimum="0" Maximum="1000" ValueChanged="SeekSlider_ValueChanged" PreviewMouseDown="SeekSlider_PreviewMouseDown" PreviewMouseUp="SeekSlider_PreviewMouseUp" Margin="0,0,0,8" />
+
+                        <DockPanel Grid.Row="1" LastChildFill="True">
+                            <StackPanel Orientation="Horizontal" DockPanel.Dock="Left">
+                                <Button x:Name="ToggleChannelsButton" Style="{StaticResource GhostButton}" Width="42" ToolTip="Show or hide channels" Click="ToggleChannels_Click" />
+                                <Button x:Name="PreviousButton" Style="{StaticResource GhostButton}" Width="42" Margin="8,0,0,0" ToolTip="Previous channel" Click="Previous_Click" />
+                                <Button x:Name="PlayPauseButton" Style="{StaticResource PrimaryButton}" Width="54" Margin="8,0,0,0" ToolTip="Play or pause" Click="PlayPause_Click" />
+                                <Button x:Name="StopButton" Style="{StaticResource GhostButton}" Width="42" Margin="8,0,0,0" ToolTip="Stop" Click="Stop_Click" />
+                                <Button x:Name="NextButton" Style="{StaticResource GhostButton}" Width="42" Margin="8,0,0,0" ToolTip="Next channel" Click="Next_Click" />
+                            </StackPanel>
+
+                            <StackPanel Orientation="Horizontal" DockPanel.Dock="Right" VerticalAlignment="Center">
+                                <TextBlock x:Name="TimeText" Text="00:00 / 00:00" VerticalAlignment="Center" Foreground="{StaticResource Text1Brush}" Margin="0,0,12,0" />
+                                <Button x:Name="MuteButton" Style="{StaticResource GhostButton}" Width="46" ToolTip="Mute" Click="Mute_Click" />
+                                <Slider x:Name="VolumeSlider" Width="120" Minimum="0" Maximum="150" Value="100" ValueChanged="VolumeSlider_ValueChanged" Margin="10,0,16,0" />
+                                <Button x:Name="FullScreenButton" Style="{StaticResource GhostButton}" Width="46" ToolTip="Full screen" Click="FullScreen_Click" />
+                            </StackPanel>
+
+                            <TextBlock x:Name="NowPlayingText" Text="Select a channel to play" VerticalAlignment="Center" HorizontalAlignment="Center" Foreground="{StaticResource Text1Brush}" TextTrimming="CharacterEllipsis" />
+                        </DockPanel>
+
+                        <Grid Grid.Row="2" Margin="0,10,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="90" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Buffer" VerticalAlignment="Center" Foreground="{StaticResource Text2Brush}" Margin="0,0,8,0" />
+                            <ComboBox x:Name="BufferBox" Grid.Column="1" SelectionChanged="BufferBox_SelectionChanged" Background="White" Foreground="#0F172A" BorderBrush="#64748B">
+                            <ComboBox.Resources>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Foreground" Value="#0F172A" />
+                                </Style>
+                            </ComboBox.Resources>
+                                <ComboBoxItem Content="1 sec" Tag="1000" />
+                                <ComboBoxItem Content="3 sec" Tag="3000" />
+                                <ComboBoxItem Content="6 sec" Tag="6000" />
+                                <ComboBoxItem Content="10 sec" Tag="10000" />
+                            </ComboBox>
+                            <TextBlock x:Name="LiveDelayText" Grid.Column="2" Text="" VerticalAlignment="Center" HorizontalAlignment="Right" Foreground="{StaticResource Text2Brush}" FontWeight="SemiBold" Margin="12,0,0,0" Visibility="Collapsed" />
+                            <Button x:Name="GoLiveButton" Grid.Column="3" Style="{StaticResource PrimaryButton}" Content="Go Live" Margin="8,0,0,0" ToolTip="Jump to live edge" Click="GoLive_Click" Visibility="Collapsed" />
+                            <Button x:Name="RestartButton" Grid.Column="4" Style="{StaticResource GhostButton}" Margin="8,0,0,0" ToolTip="Restart stream" Click="RestartStream_Click" />
+                            <Button x:Name="CopyUrlButton" Grid.Column="5" Style="{StaticResource GhostButton}" Margin="8,0,0,0" ToolTip="Copy stream URL" Click="CopyStreamUrl_Click" />
+                            <Button x:Name="FavoriteButton" Grid.Column="6" Style="{StaticResource GhostButton}" Width="42" Margin="8,0,0,0" ToolTip="Favorite" Click="ToggleFavorite_Click" />
+                        </Grid>
+
+                        <TextBlock x:Name="StreamInfoText"
+                                   Grid.Row="3"
+                                   Text="State: Not ready | Resolution: detecting | Bandwidth: detecting | Bitrate: detecting"
+                                   Margin="0,10,0,0"
+                                   Foreground="{StaticResource Text2Brush}"
+                                   TextWrapping="Wrap" />
+                    </Grid>
+                </Border>
+            </Grid>
+        </Grid>
+
+        <StatusBar x:Name="MainStatusBar" Grid.Row="2" Background="White" Foreground="Black">
+            <TextBlock x:Name="StatusText" Text="Ready" />
+        </StatusBar>
+    </Grid>
+</Window>

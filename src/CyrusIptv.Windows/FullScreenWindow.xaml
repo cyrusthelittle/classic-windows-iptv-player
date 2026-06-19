@@ -1,0 +1,85 @@
+<Window x:Class="CyrusIptv.Windows.FullScreenWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vlc="clr-namespace:LibVLCSharp.WPF;assembly=LibVLCSharp.WPF"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        WindowState="Maximized"
+        Background="Black"
+        Topmost="True"
+        ShowInTaskbar="False"
+        KeyDown="Window_KeyDown"
+        MouseMove="Window_MouseMove"
+        MouseLeftButtonDown="Window_MouseLeftButtonDown">
+    <Grid x:Name="RootGrid" Background="Black" MouseMove="Window_MouseMove" MouseLeftButtonDown="Window_MouseLeftButtonDown">
+        <Grid.ContextMenu>
+            <ContextMenu>
+                <MenuItem Header="Play / Pause" Click="PlayPause_Click" />
+                <MenuItem Header="Stop" Click="Stop_Click" />
+                <MenuItem Header="Previous" Click="Previous_Click" />
+                <MenuItem Header="Next" Click="Next_Click" />
+                <Separator />
+                <MenuItem Header="Show stream information" Click="ShowStreamInfo_Click" />
+                <MenuItem Header="Exit full screen" Click="Exit_Click" />
+            </ContextMenu>
+        </Grid.ContextMenu>
+        <vlc:VideoView x:Name="FullVideoView" Background="Black" />
+
+        <Border x:Name="ControlsOverlay"
+                VerticalAlignment="Bottom"
+                Margin="28,0,28,28"
+                Padding="18"
+                CornerRadius="22"
+                Background="White"
+                BorderBrush="{StaticResource StrokeBrush}"
+                BorderThickness="1"
+                MouseMove="Window_MouseMove">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <TextBlock x:Name="TitleText"
+                           Text="Cyrus IPTV"
+                           FontSize="20"
+                           FontWeight="SemiBold"
+                           Foreground="Black"
+                           TextTrimming="CharacterEllipsis" />
+
+                <Slider x:Name="FullSeekSlider"
+                        Grid.Row="1"
+                        Minimum="0"
+                        Maximum="1000"
+                        Margin="0,12,0,12"
+                        PreviewMouseDown="FullSeekSlider_PreviewMouseDown"
+                        PreviewMouseUp="FullSeekSlider_PreviewMouseUp"
+                        ValueChanged="FullSeekSlider_ValueChanged" />
+
+                <DockPanel Grid.Row="2" LastChildFill="True">
+                    <StackPanel Orientation="Horizontal" DockPanel.Dock="Left" VerticalAlignment="Center">
+                        <Button x:Name="FullPreviousButton" Style="{StaticResource GhostButton}" Width="46" Height="38" Margin="0,0,8,0" ToolTip="Previous channel" Click="Previous_Click" />
+                        <Button x:Name="PlayPauseButton" Style="{StaticResource PrimaryButton}" Width="58" Height="38" Margin="0,0,8,0" ToolTip="Play or pause" Click="PlayPause_Click" />
+                        <Button x:Name="FullStopButton" Style="{StaticResource GhostButton}" Width="46" Height="38" Margin="0,0,8,0" ToolTip="Stop" Click="Stop_Click" />
+                        <Button x:Name="FullNextButton" Style="{StaticResource GhostButton}" Width="46" Height="38" Margin="0,0,14,0" ToolTip="Next channel" Click="Next_Click" />
+                        <TextBlock x:Name="TimeText" Text="00:00 / 00:00" Foreground="Black" VerticalAlignment="Center" />
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" DockPanel.Dock="Right" VerticalAlignment="Center">
+                        <Button x:Name="MuteButton" Style="{StaticResource GhostButton}" Width="46" Height="38" ToolTip="Mute" Click="Mute_Click" />
+                        <Slider x:Name="VolumeSlider" Width="130" Minimum="0" Maximum="150" Value="100" Margin="10,0,18,0" ValueChanged="VolumeSlider_ValueChanged" />
+                        <Button x:Name="FullExitButton" Style="{StaticResource GhostButton}" Width="46" Height="38" ToolTip="Exit full screen" Click="Exit_Click" />
+                    </StackPanel>
+
+                    <TextBlock x:Name="MetaText"
+                               Foreground="Black"
+                               VerticalAlignment="Center"
+                               Text="State - Resolution - Bandwidth"
+                               TextAlignment="Center"
+                               TextTrimming="CharacterEllipsis" />
+                </DockPanel>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>
