@@ -14,8 +14,23 @@
     <PlatformTarget>x64</PlatformTarget>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <ApplicationIcon>Assets\CyrusIptv.ico</ApplicationIcon>
+    <!-- App is x64-only; skip bundling the x86/arm64 native LibVLC binaries (~180 MB) -->
+    <VlcWindowsX64Enabled>true</VlcWindowsX64Enabled>
+    <VlcWindowsX86Enabled>false</VlcWindowsX86Enabled>
+    <VlcWindowsArm64Enabled>false</VlcWindowsArm64Enabled>
+    <!-- App UI is English-only; skip the localized WPF resource DLLs (13 language folders) -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
   <ItemGroup>
+    <!-- Not needed at runtime: .lib link stubs, binaural-audio profiles, and lua scripts
+         (site-specific playlist parsers; IPTV playlists are parsed by CyrusIptv.Core).
+         %2A is an escaped '*' so the wildcard expands against the LibVLC package folder. -->
+    <VlcWindowsX64ExcludeFiles Include="libvlc.lib;libvlccore.lib;hrtfs\%2A%2A;lua\%2A%2A" />
+  </ItemGroup>
+  <ItemGroup>
+    <Resource Include="Assets\CyrusIptv.ico" />
+    <Resource Include="Assets\iptv-logo.png" />
     <ProjectReference Include="..\CyrusIptv.Core\CyrusIptv.Core.csproj" />
     <PackageReference Include="LibVLCSharp.WPF" Version="3.9.7.1" />
     <PackageReference Include="LibVLCSharp.WinForms" Version="3.9.7.1" />

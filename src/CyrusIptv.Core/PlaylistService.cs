@@ -128,6 +128,11 @@ public sealed class PlaylistService
 
     private async Task<IReadOnlyDictionary<string, MediaKind>> FetchXtreamMediaKindMapAsync(AccountSettings account, CancellationToken cancellationToken)
     {
+        if (!string.IsNullOrWhiteSpace(account.M3uUrl))
+        {
+            return new Dictionary<string, MediaKind>(StringComparer.OrdinalIgnoreCase);
+        }
+
         try
         {
             var apiUrl = BuildPlayerApiUrl(account);
@@ -254,6 +259,24 @@ public sealed class PlaylistService
 
     public string BuildPlaylistUrl(AccountSettings account)
     {
+        var m3uUrl = (account.M3uUrl ?? string.Empty).Trim();
+        if (!string.IsNullOrWhiteSpace(m3uUrl))
+        {
+            if (!m3uUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+                !m3uUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                m3uUrl = "http://" + m3uUrl;
+            }
+
+            if (!Uri.TryCreate(m3uUrl, UriKind.Absolute, out var directPlaylistUri) ||
+                (directPlaylistUri.Scheme != Uri.UriSchemeHttp && directPlaylistUri.Scheme != Uri.UriSchemeHttps))
+            {
+                throw new InvalidOperationException("Enter a valid HTTP or HTTPS M3U playlist link.");
+            }
+
+            return directPlaylistUri.ToString();
+        }
+
         var serverUrl = (account.ServerUrl ?? string.Empty).Trim();
         var username = (account.Username ?? string.Empty).Trim();
         var password = (account.Password ?? string.Empty).Trim();

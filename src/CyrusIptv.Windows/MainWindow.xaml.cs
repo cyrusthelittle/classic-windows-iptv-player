@@ -2,9 +2,7 @@
 using LibVLCSharp.Shared;
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
-using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -23,8 +21,9 @@ namespace CyrusIptv.Windows;
 
 public partial class MainWindow : Window
 {
-    private const int MaxVisibleItems = 2000;
-    private const int MaxPlayableCacheItems = 10000;
+    // Safety ceiling so a pathologically large playlist can't hang the UI while
+    // sorting/rendering. Items view otherwise shows every matching channel.
+    private const int MaxPlayableCacheItems = 50000;
 
     private readonly LoginResult _login;
     private readonly ConfigStore _store = new();
@@ -32,7 +31,7 @@ public partial class MainWindow : Window
     private readonly StreamProbeService _streamProbeService = new();
     private readonly RemoteControlService _remoteControlService = new();
     private readonly StreamInfoTracker _streamInfoTracker = new();
-    private readonly AppState _state;
+    private AppState _state;
     private readonly DispatcherTimer _searchTimer;
     private readonly DispatcherTimer _positionTimer;
     private readonly DispatcherTimer _controlsHideTimer;
@@ -51,16 +50,22 @@ public partial class MainWindow : Window
     private Channel? _currentChannel;
     private PauseResumeSnapshot? _pausedPlayback;
     private string? _activeFolder;
+    private string? _activeLetter;
     private bool _isSeeking;
     private bool _channelsVisible = true;
     private bool _suppressBufferChange;
     private bool _isFullScreen;
+    private bool _cursorHidden;
     private bool _channelsVisibleBeforeFullScreen = true;
     private bool _isSwitchingChannel;
     private bool _isPausedByUser;
     private bool _isShuttingDown;
-    private bool _suppressVolumeChange;
+    // XAML initializes the slider to 100 before the saved value is restored. Keep
+    // its ValueChanged event from overwriting the persisted volume during startup.
+    private bool _suppressVolumeChange = true;
+    private bool _suppressChannelSelectionChange;
     private bool _isHandlingPlaybackError;
+    private bool _isChangingAccount;
     private DateTime? _livePauseStartedUtc;
     private TimeSpan _liveBehind = TimeSpan.Zero;
     private long? _pendingResumeTimeMs;
@@ -68,7 +73,8 @@ public partial class MainWindow : Window
     private int _pendingResumeSeekAttempts;
     private int _mediaKindMode;
     private int _viewMode = 2;
-    private bool _searchItems = true;
+    // 0 = Folders (browse by playlist category), 1 = A-Z (browse by first letter), 2 = Items (flat, everything).
+    private int _browseMode;
     private int _currentCandidateIndex = -1;
     private WindowState _windowStateBeforeFullScreen;
     private WindowStyle _windowStyleBeforeFullScreen;
@@ -78,9 +84,6 @@ public partial class MainWindow : Window
     private double _topBeforeFullScreen;
     private double _widthBeforeFullScreen;
     private double _heightBeforeFullScreen;
-    private LowLevelMouseProc? _mouseHookProc;
-    private IntPtr _mouseHook;
-    private DateTime _lastVideoLeftClickUtc = DateTime.MinValue;
     private CancellationTokenSource? _filterCts;
     private CancellationTokenSource? _sourceProbeCts;
 
@@ -96,6 +99,7 @@ public partial class MainWindow : Window
         _store.Save(_state);
 
         InitializeComponent();
+        DarkModeMenuItem.IsChecked = _state.DarkMode;
         ApplyDefaultStartupFilters();
         InitializeButtonIcons();
         UpdateSearchScopeButtons();
@@ -124,15 +128,20 @@ public partial class MainWindow : Window
         };
 
         Loaded += MainWindow_Loaded;
-        Closing += (_, _) => CleanupPlayer();
+        Closing += (_, _) =>
+        {
+            SaveCurrentAudioState();
+            CleanupPlayer();
+        };
     }
 
     private void ApplyDefaultStartupFilters()
     {
-        _searchItems = true;
-        _mediaKindMode = 0;
-        _viewMode = 2;
+        _browseMode = 0;
+        _mediaKindMode = 1;
+        _viewMode = 0;
         _activeFolder = null;
+        _activeLetter = null;
     }
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
@@ -140,8 +149,14 @@ public partial class MainWindow : Window
         try
         {
             AppLogger.Info("MainWindow loaded. Initializing player and playlist.");
-            InitializePlayer();
-            InstallMouseHook();
+            ShowAccountLoading("Starting the player...");
+
+            // Loaded runs before WPF has necessarily painted the first frame.
+            // Yield below render priority so the loading card is visible before
+            // any native player initialization or playlist work starts.
+            await Dispatcher.Yield(DispatcherPriority.ContextIdle);
+
+            await InitializePlayerAsync();
             InitializeBufferBox();
             InitializeVolumeControls();
             ApplyRemoteControlState(showStatus: false);
@@ -150,44 +165,52 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             AppLogger.Error("MainWindow loaded failed.", ex);
+            HideAccountLoading();
             StatusText.Text = "Startup error: " + ex.Message;
             MessageBox.Show(this, ex.ToString(), "Startup error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
 
-    private void InitializePlayer()
+    private async Task InitializePlayerAsync()
     {
         AppLogger.Info("Initializing LibVLC player. bufferMs=" + GetPlaybackBufferMs() + "; volume=" + _state.VolumeLevel + "; muted=" + _state.Muted);
-        LibVLCSharp.Shared.Core.Initialize();
         var buffer = GetPlaybackBufferMs();
-        _libVlc = new LibVLC(
-            "--no-video-title-show",
-            "--avcodec-hw=none",
-            "--network-caching=" + buffer,
-            "--live-caching=" + buffer,
-            "--file-caching=" + buffer,
-            "--http-reconnect");
+        (_libVlc, _mediaPlayer) = await Task.Run(() =>
+        {
+            LibVLCSharp.Shared.Core.Initialize();
+            var libVlc = new LibVLC(
+                "--no-video-title-show",
+                "--avcodec-hw=none",
+                "--network-caching=" + buffer,
+                "--live-caching=" + buffer,
+                "--file-caching=" + buffer,
+                "--http-reconnect");
+            return (libVlc, new MediaPlayer(libVlc));
+        });
 
-        _mediaPlayer = new MediaPlayer(_libVlc);
         ApplySavedAudioState();
-        _mediaPlayer.Playing += (_, _) => Dispatcher.Invoke(() =>
+        _mediaPlayer.Playing += (_, _) => Dispatcher.BeginInvoke(new Action(() =>
         {
             AppLogger.Info("MediaPlayer event: Playing. " + AppLogger.DescribeChannel(_currentChannel));
             PlayPauseButton.Content = IconFactory.Create(IconFactory.Pause);
+            HideIdleBackground();
             RefreshSubtitleTracks();
             ShowControls();
             UpdateStreamInfo();
-        });
-        _mediaPlayer.Paused += (_, _) => Dispatcher.Invoke(() =>
+        }));
+        _mediaPlayer.Paused += (_, _) => Dispatcher.BeginInvoke(new Action(() =>
         {
             AppLogger.Info("MediaPlayer event: Paused. " + AppLogger.DescribeChannel(_currentChannel));
             PlayPauseButton.Content = IconFactory.Create(IconFactory.Play);
-        });
-        _mediaPlayer.Stopped += (_, _) => Dispatcher.Invoke(() =>
+        }));
+        _mediaPlayer.Stopped += (_, _) => Dispatcher.BeginInvoke(new Action(() =>
         {
             AppLogger.Info("MediaPlayer event: Stopped. " + AppLogger.DescribeChannel(_currentChannel));
             PlayPauseButton.Content = IconFactory.Create(IconFactory.Play);
-        });
+            // Stop also fires while switching channels; by the time this dispatched
+            // action runs the next stream may already be playing.
+            if (_mediaPlayer?.IsPlaying != true) ShowIdleBackground();
+        }));
         _mediaPlayer.EncounteredError += (_, _) => Dispatcher.BeginInvoke(new Action(() =>
         {
             AppLogger.Warn("MediaPlayer event: EncounteredError. candidate=" + GetCurrentCandidateLogText() + "; " + AppLogger.DescribeChannel(_currentChannel));
@@ -214,38 +237,98 @@ public partial class MainWindow : Window
 
     private async Task LoadChannelsAsync(bool updatePlaylist)
     {
+        var accountId = _state.SelectedAccountId;
         AppLogger.Info("LoadChannelsAsync begin. updatePlaylist=" + updatePlaylist + "; accountId=" + _state.SelectedAccountId);
-        StatusText.Text = updatePlaylist ? "Updating playlist..." : "Loading cached playlist...";
+        ShowAccountLoading(updatePlaylist
+            ? "Connecting to your provider and updating the playlist..."
+            : "Loading your saved playlist...");
 
-        if (updatePlaylist)
+        try
         {
-            var channels = await _playlistService.LoadPlaylistAsync(_state.Account, CancellationToken.None);
-            _channels = await Task.Run(() => channels.ToList());
-            AppLogger.Info("Playlist downloaded. channels=" + _channels.Count);
-            await Task.Run(() => _store.SaveChannelCache(_state.SelectedAccountId, _channels));
-            _state.MarkSelectedPlaylistUpdated(DateTime.UtcNow);
-            _store.Save(_state);
-        }
-        else
-        {
-            _channels = await Task.Run(() => _store.LoadChannelCache(_state.SelectedAccountId));
-            AppLogger.Info("Loaded channel cache. channels=" + _channels.Count + "; accountId=" + _state.SelectedAccountId);
-            if (_channels.Count == 0)
+            StatusText.Text = updatePlaylist ? "Updating playlist..." : "Loading cached playlist...";
+
+            if (updatePlaylist)
             {
-                AppLogger.Warn("Channel cache empty. Downloading playlist.");
-                var channels = await _playlistService.LoadPlaylistAsync(_state.Account, CancellationToken.None);
+                var account = _state.Account.Clone();
+                var channels = await Task.Run(() => _playlistService.LoadPlaylistAsync(account, CancellationToken.None));
                 _channels = await Task.Run(() => channels.ToList());
-                AppLogger.Info("Playlist downloaded after empty cache. channels=" + _channels.Count);
-                await Task.Run(() => _store.SaveChannelCache(_state.SelectedAccountId, _channels));
+                AppLogger.Info("Playlist downloaded. channels=" + _channels.Count);
+                SetAccountLoadingMessage($"Saving {_channels.Count:N0} playlist items...");
+                await Task.Run(() => _store.SaveChannelCache(accountId, _channels));
                 _state.MarkSelectedPlaylistUpdated(DateTime.UtcNow);
                 _store.Save(_state);
             }
-        }
+            else
+            {
+                _channels = await Task.Run(() => _store.LoadChannelCache(accountId));
+                AppLogger.Info("Loaded channel cache. channels=" + _channels.Count + "; accountId=" + accountId);
+                if (_channels.Count == 0)
+                {
+                    AppLogger.Warn("Channel cache empty. Downloading playlist.");
+                    SetAccountLoadingMessage("No saved playlist was found. Downloading it now...");
+                    var account = _state.Account.Clone();
+                    var channels = await Task.Run(() => _playlistService.LoadPlaylistAsync(account, CancellationToken.None));
+                    _channels = await Task.Run(() => channels.ToList());
+                    AppLogger.Info("Playlist downloaded after empty cache. channels=" + _channels.Count);
+                    SetAccountLoadingMessage($"Saving {_channels.Count:N0} playlist items...");
+                    await Task.Run(() => _store.SaveChannelCache(accountId, _channels));
+                    _state.MarkSelectedPlaylistUpdated(DateTime.UtcNow);
+                    _store.Save(_state);
+                }
+            }
 
-        _searchIndex = await Task.Run(() => new MediaSearchIndex(_channels));
-        ApplyFilters();
-        StatusText.Text = $"Loaded {_channels.Count:N0} items";
-        AppLogger.Info("LoadChannelsAsync complete. channels=" + _channels.Count);
+            SetAccountLoadingMessage($"Preparing {_channels.Count:N0} playlist items...");
+            _searchIndex = await Task.Run(() => new MediaSearchIndex(_channels));
+            await ApplyFiltersAsync();
+            StatusText.Text = $"Loaded {_channels.Count:N0} items";
+            AppLogger.Info("LoadChannelsAsync complete. channels=" + _channels.Count);
+        }
+        finally
+        {
+            HideAccountLoading();
+        }
+    }
+
+    private void ShowAccountLoading(string message)
+    {
+        AccountLoadingMessage.Text = message;
+        AccountLoadingOverlay.Visibility = Visibility.Visible;
+        VideoView.Visibility = Visibility.Collapsed;
+        Cursor = System.Windows.Input.Cursors.Wait;
+    }
+
+    private void SetAccountLoadingMessage(string message)
+    {
+        AccountLoadingMessage.Text = message;
+    }
+
+    // A visible VideoView hosts a native LibVLC child window that paints over any
+    // WPF content in the same area, so the idle background can only render
+    // correctly while VideoView is collapsed. Swap the two together.
+    private void ShowIdleBackground()
+    {
+        VideoView.Visibility = Visibility.Collapsed;
+        IdleBackground.Visibility = Visibility.Visible;
+    }
+
+    private void HideIdleBackground()
+    {
+        IdleBackground.Visibility = Visibility.Collapsed;
+        VideoView.Visibility = Visibility.Visible;
+    }
+
+    private void HideAccountLoading()
+    {
+        AccountLoadingOverlay.Visibility = Visibility.Collapsed;
+        if (_mediaPlayer?.IsPlaying == true)
+        {
+            HideIdleBackground();
+        }
+        else
+        {
+            ShowIdleBackground();
+        }
+        Cursor = null;
     }
 
     private void ApplyFilters()
@@ -265,7 +348,8 @@ public partial class MainWindow : Window
 
         var search = SearchBox.Text ?? string.Empty;
         var activeFolder = _activeFolder;
-        var searchItems = _searchItems;
+        var activeLetter = _activeLetter;
+        var browseMode = _browseMode;
         var viewMode = _viewMode;
         var channels = _channels;
         var favorites = viewMode == 1 ? _state.FavoriteIds.ToHashSet(StringComparer.OrdinalIgnoreCase) : null;
@@ -278,7 +362,7 @@ public partial class MainWindow : Window
         try
         {
             var result = await Task.Run(
-                () => BuildFilterResult(channels, search, kind, activeFolder, searchItems, favorites, recentUrls, cts.Token),
+                () => BuildFilterResult(channels, search, kind, activeFolder, activeLetter, browseMode, favorites, recentUrls, cts.Token),
                 cts.Token);
 
             if (!ReferenceEquals(_filterCts, cts) || cts.IsCancellationRequested) return;
@@ -299,6 +383,7 @@ public partial class MainWindow : Window
             FolderBackButton.Visibility = result.ShowBackButton ? Visibility.Visible : Visibility.Collapsed;
             CountText.Text = result.CountText;
             ChannelList.ItemsSource = _visibleEntries;
+            SelectPlayingChannelInVisibleList();
             if (!string.IsNullOrWhiteSpace(result.StatusText))
             {
                 StatusText.Text = result.StatusText;
@@ -319,18 +404,31 @@ public partial class MainWindow : Window
         }
     }
 
+    // A-Z, then 0-9, then "#" for anything else. Sort order for the letter folders below.
+    private const string LetterBucketOrder = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#";
+
     private static FilterResult BuildFilterResult(
         IReadOnlyList<Channel> channels,
         string search,
         MediaKind? kind,
         string? activeFolder,
-        bool searchItems,
+        string? activeLetter,
+        int browseMode,
         HashSet<string>? favorites,
         HashSet<string>? recentUrls,
         CancellationToken cancellationToken)
     {
         var queryParts = SplitSearchQuery(search);
-        if (activeFolder is null && !searchItems)
+        var activeFolderName = NormalizeGroupName(activeFolder);
+
+        // A folder drilled into from Folders mode stays in scope even after
+        // switching to A-Z, so "A-Z" buckets only the channels inside that
+        // folder instead of resetting to the whole library.
+        bool InFolderScope(Channel channel) =>
+            activeFolder is null || string.Equals(NormalizeGroupName(channel.Group), activeFolderName, StringComparison.OrdinalIgnoreCase);
+
+        // Folders scope: browse by playlist category (the Group field).
+        if (browseMode == 0 && activeFolder is null)
         {
             var folderCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             foreach (var channel in channels)
@@ -353,34 +451,72 @@ public partial class MainWindow : Window
             };
         }
 
+        // A-Z scope: browse via A-Z / 0-9 buckets by first letter, scoped to the
+        // active folder (if any) so it never mixes in channels from outside it.
+        if (browseMode == 1 && activeLetter is null)
+        {
+            var letterCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var channel in channels)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!InFolderScope(channel)) continue;
+                if (!ChannelMatchesFilter(channel, kind, queryParts, favorites, recentUrls)) continue;
+
+                var letter = GetNameBucketKey(channel.Name);
+                letterCounts.TryGetValue(letter, out var count);
+                letterCounts[letter] = count + 1;
+            }
+
+            return new FilterResult
+            {
+                Folders = letterCounts
+                    .OrderBy(pair => LetterBucketOrder.IndexOf(pair.Key, StringComparison.Ordinal))
+                    .Select(pair => new FolderResult(pair.Key, pair.Value))
+                    .ToList(),
+                ShowBackButton = activeFolder is not null,
+                CountText = $"{letterCounts.Count:N0} folders"
+            };
+        }
+
+        // Items scope (or a drill-down into a category/letter) shows the complete
+        // matching list -- no grouping, no truncation.
         var filtered = new List<Channel>(Math.Min(MaxPlayableCacheItems, channels.Count));
-        var activeFolderName = NormalizeGroupName(activeFolder);
         foreach (var channel in channels)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (activeFolder is not null && !string.Equals(NormalizeGroupName(channel.Group), activeFolderName, StringComparison.OrdinalIgnoreCase)) continue;
+            if (!InFolderScope(channel)) continue;
+            if (activeLetter is not null && !string.Equals(GetNameBucketKey(channel.Name), activeLetter, StringComparison.Ordinal)) continue;
             if (!ChannelMatchesFilter(channel, kind, queryParts, favorites, recentUrls)) continue;
 
             filtered.Add(channel);
             if (filtered.Count >= MaxPlayableCacheItems) break;
         }
 
-        if (activeFolder is not null)
+        if (activeFolder is not null || activeLetter is not null)
         {
             filtered = filtered.OrderBy(c => c.Name, StringComparer.OrdinalIgnoreCase).ToList();
         }
 
-        var visible = filtered.Take(MaxVisibleItems).ToList();
         return new FilterResult
         {
             FilteredChannels = filtered,
-            VisibleChannels = visible,
-            ShowBackButton = activeFolder is not null,
-            CountText = filtered.Count >= MaxVisibleItems ? $"{visible.Count:N0}+ items" : $"{visible.Count:N0} items",
-            StatusText = activeFolder is null && searchItems && string.IsNullOrWhiteSpace(search) && filtered.Count >= MaxVisibleItems
-                ? $"Showing first {MaxVisibleItems:N0} items. Type in search to narrow results."
-                : string.Empty
+            VisibleChannels = filtered,
+            ShowBackButton = activeFolder is not null || activeLetter is not null,
+            CountText = $"{filtered.Count:N0} items"
         };
+    }
+
+    // Buckets a channel/movie under its first letter (A-Z), first digit (0-9),
+    // or "#" for anything else (blank names, symbols, non-Latin titles, etc).
+    private static string GetNameBucketKey(string? name)
+    {
+        var trimmed = (name ?? string.Empty).TrimStart();
+        if (trimmed.Length == 0) return "#";
+
+        var ch = char.ToUpperInvariant(trimmed[0]);
+        if (ch is >= 'A' and <= 'Z') return ch.ToString();
+        if (ch is >= '0' and <= '9') return ch.ToString();
+        return "#";
     }
 
     private static bool ChannelMatchesFilter(Channel channel, MediaKind? kind, IReadOnlyList<string> queryParts, HashSet<string>? favorites, HashSet<string>? recentUrls)
@@ -447,13 +583,16 @@ public partial class MainWindow : Window
     private void FavoritesView_Click(object sender, RoutedEventArgs e) => SetViewMode(1);
     private void RecentView_Click(object sender, RoutedEventArgs e) => SetViewMode(2);
 
-    private void SearchFolders_Click(object sender, RoutedEventArgs e) => SetSearchItems(false);
-    private void SearchItems_Click(object sender, RoutedEventArgs e) => SetSearchItems(true);
+    private void SearchFolders_Click(object sender, RoutedEventArgs e) => SetBrowseMode(0);
+    private void SearchLetters_Click(object sender, RoutedEventArgs e) => SetBrowseMode(1);
+    private void SearchItems_Click(object sender, RoutedEventArgs e) => SetBrowseMode(2);
 
-    private void SetSearchItems(bool searchItems)
+    private void SetBrowseMode(int browseMode)
     {
-        _searchItems = searchItems;
-        _activeFolder = null;
+        _browseMode = Math.Clamp(browseMode, 0, 2);
+        // Keep whatever folder you've drilled into (e.g. via Folders mode) so
+        // switching to A-Z buckets just that folder instead of everything.
+        _activeLetter = null;
         UpdateSearchScopeButtons();
         ApplyFilters();
     }
@@ -474,8 +613,9 @@ public partial class MainWindow : Window
 
     private void UpdateSearchScopeButtons()
     {
-        SetViewButtonState(SearchFoldersButton, !_searchItems);
-        SetViewButtonState(SearchItemsButton, _searchItems);
+        SetViewButtonState(SearchFoldersButton, _browseMode == 0);
+        SetViewButtonState(SearchLettersButton, _browseMode == 1);
+        SetViewButtonState(SearchItemsButton, _browseMode == 2);
     }
 
     private void UpdateMediaKindButtons()
@@ -495,17 +635,21 @@ public partial class MainWindow : Window
 
     private void SetViewButtonState(System.Windows.Controls.Button button, bool selected)
     {
-        button.Background = selected
-            ? (System.Windows.Media.Brush)FindResource("AccentBrush")
-            : System.Windows.Media.Brushes.White;
-        button.BorderBrush = selected
-            ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(96, 165, 250))
-            : (System.Windows.Media.Brush)FindResource("InputLightBorderBrush");
+        button.SetResourceReference(BackgroundProperty, selected ? "AccentBrush" : "ButtonBgBrush");
+        if (selected)
+        {
+            button.BorderBrush = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(96, 165, 250));
+        }
+        else
+        {
+            button.SetResourceReference(BorderBrushProperty, "InputLightBorderBrush");
+        }
         button.FontWeight = selected ? FontWeights.Bold : FontWeights.Normal;
     }
 
     private void ChannelList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (_suppressChannelSelectionChange) return;
         if (ChannelList.SelectedItem is ChannelListEntry { Channel: { } channel }) BuildSourceList(channel);
         UpdateFavoriteButton();
     }
@@ -517,7 +661,16 @@ public partial class MainWindow : Window
 
     private void FolderBack_Click(object sender, RoutedEventArgs e)
     {
-        _activeFolder = null;
+        // Pop one level at a time: out of a letter drill-down first (back to
+        // that folder's letter buckets), then out of the folder itself.
+        if (_activeLetter is not null)
+        {
+            _activeLetter = null;
+        }
+        else
+        {
+            _activeFolder = null;
+        }
         ApplyFilters();
     }
 
@@ -535,7 +688,14 @@ public partial class MainWindow : Window
 
     private void EnterFolder(string folderName)
     {
-        _activeFolder = NormalizeGroupName(folderName);
+        if (_browseMode == 0)
+        {
+            _activeFolder = NormalizeGroupName(folderName);
+        }
+        else
+        {
+            _activeLetter = folderName;
+        }
         ApplyFilters();
         if (_visibleEntries.Count > 0)
         {
@@ -546,17 +706,46 @@ public partial class MainWindow : Window
 
     private void SelectChannelInList(Channel channel)
     {
-        if (!_searchItems)
+        if (_browseMode == 0)
         {
             _activeFolder = NormalizeGroupName(channel.Group);
         }
+        else if (_browseMode == 1)
+        {
+            // Drop a stale folder scope if the channel isn't actually inside it,
+            // otherwise the letter drill-down alone can't make it visible.
+            if (_activeFolder is not null && !string.Equals(NormalizeGroupName(channel.Group), _activeFolder, StringComparison.OrdinalIgnoreCase))
+            {
+                _activeFolder = null;
+            }
+            _activeLetter = GetNameBucketKey(channel.Name);
+        }
         ApplyFilters();
 
-        var match = _visibleEntries.FirstOrDefault(e => e.Channel is not null && string.Equals(e.Channel.Id, channel.Id, StringComparison.OrdinalIgnoreCase));
+        // Select immediately when the channel is already in the current result.
+        // ApplyFiltersAsync repeats this after replacing the ItemsSource.
+        SelectPlayingChannelInVisibleList();
+    }
+
+    private void SelectPlayingChannelInVisibleList()
+    {
+        if (_currentChannel is null) return;
+
+        var match = _visibleEntries.FirstOrDefault(e =>
+            e.Channel is not null &&
+            string.Equals(e.Channel.Id, _currentChannel.Id, StringComparison.OrdinalIgnoreCase));
         if (match is not null)
         {
-            ChannelList.SelectedItem = match;
-            ChannelList.ScrollIntoView(match);
+            _suppressChannelSelectionChange = true;
+            try
+            {
+                ChannelList.SelectedItem = match;
+                ChannelList.ScrollIntoView(match);
+            }
+            finally
+            {
+                _suppressChannelSelectionChange = false;
+            }
         }
     }
 
@@ -647,6 +836,7 @@ public partial class MainWindow : Window
             }
 
             _currentMedia = nextMedia;
+            HideIdleBackground();
             var playStarted = _mediaPlayer.Play(_currentMedia);
             AppLogger.Info("MediaPlayer.Play called. started=" + playStarted + "; " + GetCurrentCandidateLogText());
             ApplySavedAudioState();
@@ -657,7 +847,7 @@ public partial class MainWindow : Window
             DisposeMediaLater(previousMedia);
             RefreshSubtitleTracks();
             NowPlayingText.Text = channel.Name;
-            StatusText.Text = "Playing: " + channel.Name + " â€¢ " + candidate.Label;
+            StatusText.Text = "Playing: " + channel.Name + " • " + candidate.Label;
             AddRecent(channel);
             ShowControls();
             UpdateStreamInfo();
@@ -813,6 +1003,7 @@ public partial class MainWindow : Window
             PlayedAtUtc = DateTime.UtcNow
         });
         if (_state.Recent.Count > 20) _state.Recent.RemoveRange(20, _state.Recent.Count - 20);
+
         _store.Save(_state);
     }
 
@@ -1034,7 +1225,7 @@ public partial class MainWindow : Window
 
     private void PlayRelative(int delta)
     {
-        var playableChannels = _activeFolder is null ? _filteredChannels : _visibleChannels;
+        var playableChannels = _activeFolder is null && _activeLetter is null ? _filteredChannels : _visibleChannels;
         if (playableChannels.Count == 0) return;
 
         var index = _currentChannel is null
@@ -1279,9 +1470,28 @@ public partial class MainWindow : Window
         _mediaPlayer.Mute = _state.Muted;
     }
 
+    private void SaveCurrentAudioState()
+    {
+        try
+        {
+            if (VolumeSlider is not null)
+            {
+                _state.VolumeLevel = Math.Clamp((int)Math.Round(VolumeSlider.Value), 0, 150);
+            }
+
+            _store.Save(_state);
+            AppLogger.Info("Saved audio state on exit. volume=" + _state.VolumeLevel + "; muted=" + _state.Muted);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn("Could not save audio state on exit. " + ex.Message);
+        }
+    }
+
     private void ShowVolumeOsd()
     {
         VolumeOsdText.Text = _state.Muted ? "Muted" : $"Volume {_state.VolumeLevel}%";
+        ApplyOsdOpacity();
         VolumeOsdPopup.IsOpen = true;
         _volumeOsdTimer.Stop();
         _volumeOsdTimer.Start();
@@ -1334,7 +1544,6 @@ public partial class MainWindow : Window
         ResizeMode = ResizeMode.NoResize;
         Topmost = true;
         CoverCurrentMonitor();
-        InstallMouseHook();
 
         ShowControls();
         _controlsHideTimer.Stop();
@@ -1345,6 +1554,7 @@ public partial class MainWindow : Window
     private void ExitFullScreen()
     {
         _isFullScreen = false;
+        SetCursorHidden(false);
         _controlsHideTimer.Stop();
 
         Topmost = _topmostBeforeFullScreen;
@@ -1393,6 +1603,27 @@ public partial class MainWindow : Window
     {
         if (e.ClickCount >= 2) ToggleFullScreen();
         else ShowControls();
+        e.Handled = true;
+    }
+
+    private void VideoHost_MouseRightButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        ShowVideoContextMenu();
+        e.Handled = true;
+    }
+
+    private void Window_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
+    {
+        // MouseWheel routes via keyboard focus, not cursor position, so this has to be
+        // handled at the window (tunneling) and hit-tested manually against VideoHost's
+        // bounds to scope it to the playback area without blocking scrolling elsewhere
+        // (e.g. the channel list).
+        var pos = e.GetPosition(VideoHost);
+        if (pos.X < 0 || pos.Y < 0 || pos.X > VideoHost.ActualWidth || pos.Y > VideoHost.ActualHeight) return;
+
+        SetVolume(_state.VolumeLevel + (e.Delta > 0 ? 5 : -5));
+        ShowControls();
+        e.Handled = true;
     }
 
     private void Window_MouseMove(object sender, System.Windows.Input.MouseEventArgs e) => ShowControls();
@@ -1400,6 +1631,7 @@ public partial class MainWindow : Window
 
     private void ShowControls()
     {
+        SetCursorHidden(false);
         if (_isFullScreen)
         {
             AttachControlsToFullScreenPopup();
@@ -1420,7 +1652,18 @@ public partial class MainWindow : Window
         if (_isFullScreen)
         {
             FullScreenControlsPopup.IsOpen = false;
+            // Hide the cursor together with the OSD. The video area is covered by
+            // WPF overlay surfaces (including LibVLC's floating overlay window),
+            // so the app-wide override is the only reliable way to reach them all.
+            if (IsActive) SetCursorHidden(true);
         }
+    }
+
+    private void SetCursorHidden(bool hidden)
+    {
+        if (_cursorHidden == hidden) return;
+        _cursorHidden = hidden;
+        System.Windows.Input.Mouse.OverrideCursor = hidden ? System.Windows.Input.Cursors.None : null;
     }
 
     private void AttachControlsToFullScreenPopup()
@@ -1435,11 +1678,115 @@ public partial class MainWindow : Window
         ControlsBar.Visibility = Visibility.Visible;
         ControlsBar.Width = Math.Max(320, VideoHost.ActualWidth);
         ControlsBar.VerticalAlignment = VerticalAlignment.Bottom;
-        ControlsBar.Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromArgb(179, 255, 255, 255));
-        ControlsBar.BorderBrush = (System.Windows.Media.Brush)FindResource("StrokeBrush");
+        ControlsBar.SetResourceReference(BackgroundProperty, "PanelBrush");
+        ApplyOsdOpacity();
+        ControlsBar.SetResourceReference(BorderBrushProperty, "StrokeBrush");
         ControlsBar.BorderThickness = new Thickness(1, 1, 1, 0);
         ControlsBar.Margin = new Thickness(0);
         FullScreenControlsPopup.Child = ControlsBar;
+    }
+
+    private void ToggleDarkMode_Click(object sender, RoutedEventArgs e)
+    {
+        _state.DarkMode = DarkModeMenuItem.IsChecked;
+        ThemeManager.Apply(_state.DarkMode);
+        _store.Save(_state);
+        StatusText.Text = _state.DarkMode ? "Dark mode enabled." : "Light mode enabled.";
+    }
+
+    private void SetOsdOpacity_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is System.Windows.Controls.MenuItem item && item.Tag is string s)
+        {
+            if (double.TryParse(s, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v))
+            {
+                SaveOsdOpacity(v);
+            }
+        }
+    }
+
+    private void SetCustomOsdOpacity_Click(object sender, RoutedEventArgs e)
+    {
+        var input = new System.Windows.Controls.TextBox
+        {
+            Text = Math.Round(Math.Clamp(_state.OsdOpacity, 0.0, 1.0) * 100).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            Width = 90,
+            Margin = new Thickness(0, 8, 0, 14),
+            HorizontalAlignment = System.Windows.HorizontalAlignment.Left
+        };
+        input.SelectAll();
+
+        var okButton = new System.Windows.Controls.Button
+        {
+            Content = "OK",
+            Width = 80,
+            Margin = new Thickness(0, 0, 8, 0),
+            IsDefault = true
+        };
+        var cancelButton = new System.Windows.Controls.Button
+        {
+            Content = "Cancel",
+            Width = 80,
+            IsCancel = true
+        };
+        var buttons = new StackPanel
+        {
+            Orientation = System.Windows.Controls.Orientation.Horizontal,
+            HorizontalAlignment = System.Windows.HorizontalAlignment.Right
+        };
+        buttons.Children.Add(okButton);
+        buttons.Children.Add(cancelButton);
+
+        var content = new StackPanel { Margin = new Thickness(18) };
+        content.Children.Add(new TextBlock { Text = "Enter an OSD opacity from 0 to 100 percent:" });
+        content.Children.Add(input);
+        content.Children.Add(buttons);
+
+        var dialog = new Window
+        {
+            Title = "OSD opacity",
+            Owner = this,
+            Content = content,
+            Width = 360,
+            Height = 165,
+            ResizeMode = ResizeMode.NoResize,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            ShowInTaskbar = false
+        };
+
+        okButton.Click += (_, _) =>
+        {
+            if (!int.TryParse(input.Text, out var percent) || percent < 0 || percent > 100)
+            {
+                MessageBox.Show(dialog, "Enter a whole number from 0 to 100.", "Invalid opacity", MessageBoxButton.OK, MessageBoxImage.Warning);
+                input.Focus();
+                input.SelectAll();
+                return;
+            }
+
+            dialog.DialogResult = true;
+        };
+
+        dialog.Loaded += (_, _) => input.Focus();
+        if (dialog.ShowDialog() == true && int.TryParse(input.Text, out var selectedPercent))
+        {
+            SaveOsdOpacity(selectedPercent / 100.0);
+        }
+    }
+
+    private void SaveOsdOpacity(double opacity)
+    {
+        _state.OsdOpacity = Math.Clamp(opacity, 0.0, 1.0);
+        _store.Save(_state);
+        ApplyOsdOpacity();
+        StatusText.Text = $"Controls and volume OSD opacity set to {(int)Math.Round(_state.OsdOpacity * 100)}%.";
+    }
+
+    private void ApplyOsdOpacity()
+    {
+        var opacity = Math.Clamp(_state.OsdOpacity, 0.0, 1.0);
+        if (VolumeOsdBorder is not null) VolumeOsdBorder.Opacity = opacity;
+        if (ControlsBar is not null) ControlsBar.Opacity = _isFullScreen ? opacity : 1.0;
     }
 
     private void RestoreControlsToPlayerGrid()
@@ -1459,11 +1806,12 @@ public partial class MainWindow : Window
         Grid.SetRowSpan(ControlsBar, 1);
         ControlsBar.Width = double.NaN;
         ControlsBar.VerticalAlignment = VerticalAlignment.Stretch;
-        ControlsBar.Background = System.Windows.Media.Brushes.White;
-        ControlsBar.BorderBrush = (System.Windows.Media.Brush)FindResource("StrokeBrush");
+        ControlsBar.SetResourceReference(BackgroundProperty, "PanelBrush");
+        ControlsBar.SetResourceReference(BorderBrushProperty, "StrokeBrush");
         ControlsBar.BorderThickness = new Thickness(1, 1, 0, 0);
         ControlsBar.Margin = new Thickness(0);
         ControlsBar.Visibility = Visibility.Visible;
+        ControlsBar.Opacity = 1.0;
     }
 
     private void RepositionFullScreenControlsPopup()
@@ -1501,13 +1849,82 @@ public partial class MainWindow : Window
         }
     }
 
-    private void ChangeAccount_Click(object sender, RoutedEventArgs e)
+    private async void ChangeAccount_Click(object sender, RoutedEventArgs e)
     {
+        if (_isChangingAccount) return;
+        _isChangingAccount = true;
+
+        SaveCurrentAudioState();
+        _store.Save(_state);
+        StopPlayback();
         var login = new LoginWindow { Owner = this };
-        if (login.ShowDialog() == true)
+        try
         {
-            MessageBox.Show(this, "Please restart the modern shell after changing account in this migration build.", "Account changed");
+            if (login.ShowDialog() != true) return;
+
+            var result = login.LoginResult;
+            AppLogger.Info("Changing account without restart. accountId=" + result.AccountId + "; updatePlaylist=" + result.UpdatePlaylist);
+
+            ResetAccountView();
+
+            // The account manager uses its own AppState instance and may have added
+            // or removed accounts. Reload it so this window sees those changes.
+            _state = _store.Load();
+            _state.SelectedAccountId = result.AccountId;
+            var selectedAccount = _state.EnsureSelectedAccount();
+            selectedAccount.Settings = result.Account.Clone();
+            _state.Account = selectedAccount.Settings.Clone();
+            _store.Save(_state);
+
+            InitializeBufferBox();
+            InitializeVolumeControls();
+            ApplyRemoteControlState(showStatus: false);
+            await LoadChannelsAsync(result.UpdatePlaylist);
+            AppLogger.Info("Account changed successfully. accountId=" + result.AccountId);
         }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Account change failed.", ex);
+            StatusText.Text = "Account change failed: " + ex.Message;
+            MessageBox.Show(this, ex.Message, "Account change error", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally
+        {
+            _isChangingAccount = false;
+        }
+    }
+
+    private void ResetAccountView()
+    {
+        _filterCts?.Cancel();
+        _sourceProbeCts?.Cancel();
+        _sourceProbeCts?.Dispose();
+        _sourceProbeCts = null;
+
+        var previousMedia = _currentMedia;
+        _currentMedia = null;
+        previousMedia?.Dispose();
+        _currentChannel = null;
+        _currentCandidates = [];
+        _currentCandidateIndex = -1;
+        _searchIndex = null;
+        _channels = [];
+        _filteredChannels = [];
+        _visibleChannels = [];
+        _visibleEntries = [];
+        _activeFolder = null;
+        _activeLetter = null;
+
+        SearchBox.Clear();
+        ChannelList.ItemsSource = null;
+        FolderBackButton.Visibility = Visibility.Collapsed;
+        CountText.Text = "0 items";
+        NowPlayingText.Text = "Select a channel to play";
+        PlayPauseButton.Content = IconFactory.Create(IconFactory.Play);
+        UpdateFavoriteButton();
+        RefreshSubtitleTracks();
+        UpdateStreamInfo();
+        StatusText.Text = "Switching account...";
     }
 
     private void Buffer1_Click(object sender, RoutedEventArgs e) => SetBuffer(1000);
@@ -1703,7 +2120,7 @@ public partial class MainWindow : Window
                 case "back":
                     if (_isFullScreen) ToggleFullScreen();
                     else if (!_channelsVisible) ToggleChannels_Click(this, new RoutedEventArgs());
-                    else if (_activeFolder is not null) FolderBack_Click(this, new RoutedEventArgs());
+                    else if (_activeFolder is not null || _activeLetter is not null) FolderBack_Click(this, new RoutedEventArgs());
                     break;
             }
         }));
@@ -1798,88 +2215,6 @@ public partial class MainWindow : Window
         VideoHost.ContextMenu.IsOpen = true;
     }
 
-    private void InstallMouseHook()
-    {
-        if (_mouseHook != IntPtr.Zero) return;
-        _mouseHookProc = LowLevelMouseCallback;
-        using var process = Process.GetCurrentProcess();
-        using var module = process.MainModule;
-        var moduleHandle = module is null ? IntPtr.Zero : GetModuleHandle(module.ModuleName);
-        _mouseHook = SetWindowsHookEx(14, _mouseHookProc, moduleHandle, 0);
-    }
-
-    private void UninstallMouseHook()
-    {
-        if (_mouseHook == IntPtr.Zero) return;
-        UnhookWindowsHookEx(_mouseHook);
-        _mouseHook = IntPtr.Zero;
-        _mouseHookProc = null;
-    }
-
-    private IntPtr LowLevelMouseCallback(int nCode, IntPtr wParam, IntPtr lParam)
-    {
-        const int WmMouseMove = 0x0200;
-        const int WmLButtonDown = 0x0201;
-        const int WmRButtonUp = 0x0205;
-        const int WmLButtonDblClk = 0x0203;
-
-        if (_isShuttingDown)
-        {
-            return CallNextHookEx(_mouseHook, nCode, wParam, lParam);
-        }
-
-        try
-        {
-            if (nCode >= 0 && IsActive && IsCursorOverVideoHost())
-            {
-                if (wParam == (IntPtr)WmMouseMove)
-                {
-                    if (_isFullScreen)
-                    {
-                        Dispatcher.BeginInvoke(new Action(ShowControls));
-                    }
-                }
-                else if (wParam == (IntPtr)WmRButtonUp)
-                {
-                    Dispatcher.BeginInvoke(new Action(ShowVideoContextMenu));
-                    return (IntPtr)1;
-                }
-
-                if (wParam == (IntPtr)WmLButtonDown || wParam == (IntPtr)WmLButtonDblClk)
-                {
-                    var now = DateTime.UtcNow;
-                    if (wParam == (IntPtr)WmLButtonDblClk || now - _lastVideoLeftClickUtc < TimeSpan.FromMilliseconds(430))
-                    {
-                        Dispatcher.BeginInvoke(new Action(ToggleFullScreen));
-                        return (IntPtr)1;
-                    }
-                    _lastVideoLeftClickUtc = now;
-                }
-            }
-        }
-        catch
-        {
-            // Never let a low-level hook exception interfere with Windows input.
-        }
-
-        return CallNextHookEx(_mouseHook, nCode, wParam, lParam);
-    }
-
-    private bool IsCursorOverVideoHost()
-    {
-        try
-        {
-            if (!GetCursorPos(out var pos)) return false;
-            var topLeft = VideoHost.PointToScreen(new Point(0, 0));
-            var rect = new Rect(topLeft.X, topLeft.Y, VideoHost.ActualWidth, VideoHost.ActualHeight);
-            return rect.Contains(new Point(pos.X, pos.Y));
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
     private sealed class ChannelListEntry
     {
         public string Name { get; private init; } = string.Empty;
@@ -1918,36 +2253,11 @@ public partial class MainWindow : Window
 
     private sealed record PauseResumeSnapshot(Channel Channel, int CandidateIndex, long TimeMs);
 
-    private delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint dwThreadId);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool UnhookWindowsHookEx(IntPtr hhk);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-    private static extern IntPtr GetModuleHandle(string? lpModuleName);
-
-    [DllImport("user32.dll")]
-    private static extern bool GetCursorPos(out POINT lpPoint);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct POINT
-    {
-        public int X;
-        public int Y;
-    }
-
     private void CleanupPlayer()
     {
         try
         {
             PrepareWindowForShutdown();
-            UninstallMouseHook();
             _sourceProbeCts?.Cancel();
             _sourceProbeCts?.Dispose();
             _sourceProbeCts = null;

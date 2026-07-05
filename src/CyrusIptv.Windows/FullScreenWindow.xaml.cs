@@ -1,7 +1,5 @@
 using LibVLCSharp.Shared;
 using System;
-using System.Diagnostics;
-using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Threading;
@@ -24,9 +22,6 @@ public partial class FullScreenWindow : Window
     private readonly DispatcherTimer _positionTimer;
     private bool _isSeeking;
     private bool _closedCallbackSent;
-    private LowLevelMouseProc? _mouseHookProc;
-    private IntPtr _mouseHook;
-    private DateTime _lastLeftClickUtc = DateTime.MinValue;
 
     public FullScreenWindow(
         MediaPlayer mediaPlayer,
@@ -59,7 +54,6 @@ public partial class FullScreenWindow : Window
 
         Loaded += (_, _) => Dispatcher.BeginInvoke(new Action(() =>
         {
-            InstallMouseHook();
             _positionTimer.Start();
             ShowControlsTemporarily();
             Activate();
@@ -67,7 +61,6 @@ public partial class FullScreenWindow : Window
         }), DispatcherPriority.ApplicationIdle);
         Closed += (_, _) =>
         {
-            UninstallMouseHook();
             _positionTimer.Stop();
             _hideTimer.Stop();
             FullVideoView.MediaPlayer = null;
@@ -167,6 +160,21 @@ public partial class FullScreenWindow : Window
     {
         if (e.ClickCount >= 2) Close();
         else ShowControlsTemporarily();
+        e.Handled = true;
+    }
+
+    private void Window_MouseRightButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        ShowContextMenu();
+        e.Handled = true;
+    }
+
+    private void Window_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
+    {
+        if (e.Delta > 0) _setVolume((int)Math.Min(150, VolumeSlider.Value + 5));
+        else _setVolume((int)Math.Max(0, VolumeSlider.Value - 5));
+        ShowControlsTemporarily();
+        e.Handled = true;
     }
 
     private void Window_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
@@ -244,66 +252,4 @@ public partial class FullScreenWindow : Window
         _closed();
     }
 
-    private void InstallMouseHook()
-    {
-        if (_mouseHook != IntPtr.Zero) return;
-        _mouseHookProc = LowLevelMouseCallback;
-        using var process = Process.GetCurrentProcess();
-        using var module = process.MainModule;
-        var moduleHandle = module is null ? IntPtr.Zero : GetModuleHandle(module.ModuleName);
-        _mouseHook = SetWindowsHookEx(14, _mouseHookProc, moduleHandle, 0);
-    }
-
-    private void UninstallMouseHook()
-    {
-        if (_mouseHook == IntPtr.Zero) return;
-        UnhookWindowsHookEx(_mouseHook);
-        _mouseHook = IntPtr.Zero;
-        _mouseHookProc = null;
-    }
-
-    private IntPtr LowLevelMouseCallback(int nCode, IntPtr wParam, IntPtr lParam)
-    {
-        const int WmMouseMove = 0x0200;
-        const int WmLButtonDown = 0x0201;
-        const int WmLButtonDblClk = 0x0203;
-        const int WmRButtonUp = 0x0205;
-        if (nCode >= 0)
-        {
-            if (wParam == (IntPtr)WmMouseMove)
-            {
-                Dispatcher.BeginInvoke(new Action(ShowControlsTemporarily));
-            }
-            else if (wParam == (IntPtr)WmRButtonUp)
-            {
-                Dispatcher.BeginInvoke(new Action(ShowContextMenu));
-                return (IntPtr)1;
-            }
-            else if (wParam == (IntPtr)WmLButtonDblClk || wParam == (IntPtr)WmLButtonDown)
-            {
-                var now = DateTime.UtcNow;
-                if (wParam == (IntPtr)WmLButtonDblClk || now - _lastLeftClickUtc < TimeSpan.FromMilliseconds(430))
-                {
-                    Dispatcher.BeginInvoke(new Action(Close));
-                    return (IntPtr)1;
-                }
-                _lastLeftClickUtc = now;
-            }
-        }
-        return CallNextHookEx(_mouseHook, nCode, wParam, lParam);
-    }
-
-    private delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint dwThreadId);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool UnhookWindowsHookEx(IntPtr hhk);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-    private static extern IntPtr GetModuleHandle(string? lpModuleName);
 }

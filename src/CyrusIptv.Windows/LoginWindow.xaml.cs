@@ -4,6 +4,8 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
+using KeyEventArgs = System.Windows.Input.KeyEventArgs;
 
 namespace CyrusIptv.Windows;
 
@@ -37,9 +39,10 @@ public partial class LoginWindow : Window
         var selected = SaveSelectedAccount();
         if (selected is null) return;
 
-        if (string.IsNullOrWhiteSpace(selected.Settings.ServerUrl))
+        if (string.IsNullOrWhiteSpace(selected.Settings.ServerUrl) &&
+            string.IsNullOrWhiteSpace(selected.Settings.M3uUrl))
         {
-            StatusText.Text = "Server URL is required.";
+            StatusText.Text = "Enter a server URL or an M3U playlist link.";
             return;
         }
 
@@ -115,11 +118,13 @@ public partial class LoginWindow : Window
     {
         if (_loadingAccount) return _state.EnsureSelectedAccount();
         var selected = _state.EnsureSelectedAccount();
+        var useM3u = AccountTypeBox.SelectedIndex == 1;
         var settings = new AccountSettings
         {
-            ServerUrl = ServerUrlBox.Text.Trim(),
-            Username = UsernameBox.Text.Trim(),
-            Password = PasswordBox.Password.Trim(),
+            ServerUrl = useM3u ? string.Empty : ServerUrlBox.Text.Trim(),
+            M3uUrl = useM3u ? M3uUrlBox.Text.Trim() : string.Empty,
+            Username = useM3u ? string.Empty : UsernameBox.Text.Trim(),
+            Password = useM3u ? string.Empty : PasswordBox.Password.Trim(),
             PreferredPlayerPath = selected.Settings.PreferredPlayerPath
         };
 
@@ -163,8 +168,11 @@ public partial class LoginWindow : Window
         var account = _state.EnsureSelectedAccount();
         AccountNameBox.Text = account.Name;
         ServerUrlBox.Text = account.Settings.ServerUrl;
+        M3uUrlBox.Text = account.Settings.M3uUrl;
         UsernameBox.Text = account.Settings.Username;
         PasswordBox.Password = account.Settings.Password;
+        AccountTypeBox.SelectedIndex = string.IsNullOrWhiteSpace(account.Settings.M3uUrl) ? 0 : 1;
+        UpdateAccountTypeFields();
 
         var hasCache = _store.HasChannelCacheForAccount(account.Id);
         var mustUpdate = account.LastPlaylistUpdatedUtc is null || !hasCache;
@@ -179,6 +187,31 @@ public partial class LoginWindow : Window
     {
         if (updatedUtc is null) return "Never";
         return updatedUtc.Value.ToLocalTime().ToString("g");
+    }
+
+    private void AccountTypeBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        UpdateAccountTypeFields();
+    }
+
+    private void UpdateAccountTypeFields()
+    {
+        if (XtreamFieldsPanel is null || M3uFieldsPanel is null) return;
+        var useM3u = AccountTypeBox.SelectedIndex == 1;
+        XtreamFieldsPanel.Visibility = useM3u ? Visibility.Collapsed : Visibility.Visible;
+        M3uFieldsPanel.Visibility = useM3u ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void Window_Loaded(object sender, RoutedEventArgs e)
+    {
+        AccountsList.Focus();
+    }
+
+    private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter || Keyboard.Modifiers != ModifierKeys.None) return;
+        e.Handled = true;
+        Continue_Click(this, new RoutedEventArgs());
     }
 
     private sealed record AccountListItem(string Id, string Text)

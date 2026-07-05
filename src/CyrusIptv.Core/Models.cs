@@ -8,6 +8,7 @@ namespace CyrusIptv.Core;
 public sealed class AccountSettings
 {
     public string ServerUrl { get; set; } = string.Empty;
+    public string M3uUrl { get; set; } = string.Empty;
     public string Username { get; set; } = string.Empty;
     public string Password { get; set; } = string.Empty;
     public string PreferredPlayerPath { get; set; } = string.Empty;
@@ -15,6 +16,7 @@ public sealed class AccountSettings
     public AccountSettings Clone() => new()
     {
         ServerUrl = ServerUrl,
+        M3uUrl = M3uUrl,
         Username = Username,
         Password = Password,
         PreferredPlayerPath = PreferredPlayerPath
@@ -110,6 +112,13 @@ public sealed class AppState
     public bool RemoteControlEnabled { get; set; } = false;
     public int RemoteControlPort { get; set; } = 53177;
 
+    // Shared transparency for the auto-hide controls panel and volume OSD.
+    // Range: 0.0 (fully transparent) .. 1.0 (fully opaque)
+    public double OsdOpacity { get; set; } = 0.7;
+
+    // UI theme. Light stays the default so existing installs keep their look.
+    public bool DarkMode { get; set; } = false;
+
     public SavedAccount EnsureSelectedAccount()
     {
         EnsureAccounts();
@@ -199,6 +208,7 @@ public sealed class AppState
     private bool HasLegacyAccount()
     {
         return !string.IsNullOrWhiteSpace(Account.ServerUrl) ||
+               !string.IsNullOrWhiteSpace(Account.M3uUrl) ||
                !string.IsNullOrWhiteSpace(Account.Username) ||
                !string.IsNullOrWhiteSpace(Account.Password);
     }
@@ -206,6 +216,7 @@ public sealed class AppState
     private static string BuildFallbackName(AccountSettings settings)
     {
         if (!string.IsNullOrWhiteSpace(settings.Username)) return settings.Username.Trim();
+        if (!string.IsNullOrWhiteSpace(settings.M3uUrl)) return "M3U playlist";
         if (!string.IsNullOrWhiteSpace(settings.ServerUrl)) return settings.ServerUrl.Trim();
         return "New account";
     }

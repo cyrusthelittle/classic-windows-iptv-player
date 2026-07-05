@@ -61,6 +61,8 @@ public partial class App : WpfApplication
 
         try
         {
+            ThemeManager.Apply(new ConfigStore().Load().DarkMode);
+
             var loginWindow = new LoginWindow();
             var result = loginWindow.ShowDialog();
             if (result != true)

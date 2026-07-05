@@ -13,14 +13,14 @@ if errorlevel 1 (
 if exist release\windows-modern rmdir /s /q release\windows-modern
 mkdir release\windows-modern
 
-dotnet publish src\CyrusIptv.Windows\CyrusIptv.Windows.csproj -c Release -r win-x64 --self-contained true -o release\windows-modern /p:PublishSingleFile=false --nologo
+dotnet publish src\CyrusIptv.Windows\CyrusIptv.Windows.csproj -c Release -r win-x64 --self-contained true -o release\windows-modern /p:PublishSingleFile=true /p:EnableCompressionInSingleFile=true --nologo
 if errorlevel 1 (
   echo Publish failed.
   pause
   exit /b 1
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\RepairWindowsLibVlc.ps1 -Configuration Release
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\RepairWindowsLibVlc.ps1
 
 echo.
 echo Done. Release folder:

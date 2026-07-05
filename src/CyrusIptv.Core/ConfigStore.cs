@@ -158,6 +158,12 @@ public sealed class ConfigStore
         {
             var path = GetChannelCachePath(accountId);
             if (File.Exists(path)) File.Delete(path);
+
+            // Also remove any leftover recent-channel cache file from older
+            // versions that used to keep a separate fast-startup cache.
+            var safeId = SanitizeFileName(string.IsNullOrWhiteSpace(accountId) ? "default" : accountId);
+            var legacyRecentPath = Path.Combine(_appFolder, $"channels-{safeId}-recent.json.gz");
+            if (File.Exists(legacyRecentPath)) File.Delete(legacyRecentPath);
         }
         catch
         {

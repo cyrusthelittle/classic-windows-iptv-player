@@ -10,7 +10,8 @@
         ShowInTaskbar="False"
         KeyDown="Window_KeyDown"
         MouseMove="Window_MouseMove"
-        MouseLeftButtonDown="Window_MouseLeftButtonDown">
+        MouseLeftButtonDown="Window_MouseLeftButtonDown"
+        PreviewMouseWheel="Window_PreviewMouseWheel">
     <Grid x:Name="RootGrid" Background="Black" MouseMove="Window_MouseMove" MouseLeftButtonDown="Window_MouseLeftButtonDown">
         <Grid.ContextMenu>
             <ContextMenu>
@@ -23,7 +24,12 @@
                 <MenuItem Header="Exit full screen" Click="Exit_Click" />
             </ContextMenu>
         </Grid.ContextMenu>
-        <vlc:VideoView x:Name="FullVideoView" Background="Black" />
+        <vlc:VideoView x:Name="FullVideoView" Background="Black">
+            <Border Background="#01000000"
+                    MouseMove="Window_MouseMove"
+                    MouseLeftButtonDown="Window_MouseLeftButtonDown"
+                    MouseRightButtonUp="Window_MouseRightButtonUp" />
+        </vlc:VideoView>
 
         <Border x:Name="ControlsOverlay"
                 VerticalAlignment="Bottom"

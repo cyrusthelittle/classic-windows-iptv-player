@@ -1,14 +1,7 @@
-param(
-  [string]$Configuration = "Release"
-)
-
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$projectRoot = Join-Path $repoRoot "src\CyrusIptv.Windows"
 $packageRoot = Join-Path $env:USERPROFILE ".nuget\packages\videolan.libvlc.windows"
 $outputCandidates = @(
-  (Join-Path $projectRoot "bin\$Configuration\net10.0-windows\win-x64"),
-  (Join-Path $projectRoot "bin\$Configuration\net10.0-windows"),
   (Join-Path $repoRoot "release\windows-modern")
 )
 

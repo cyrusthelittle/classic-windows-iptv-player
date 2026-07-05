@@ -28,22 +28,32 @@ internal static class IconFactory
 
     public static Viewbox Create(string geometry, double size = 18)
     {
+        var path = new Path
+        {
+            Data = Geometry.Parse(geometry),
+            Stretch = Stretch.Uniform
+        };
+        // Follow the active theme so icons stay visible on dark buttons.
+        path.SetResourceReference(Shape.FillProperty, "Text0Brush");
         return new Viewbox
         {
             Width = size,
             Height = size,
             Stretch = Stretch.Uniform,
-            Child = new Path
-            {
-                Data = Geometry.Parse(geometry),
-                Fill = System.Windows.Media.Brushes.Black,
-                Stretch = Stretch.Uniform
-            }
+            Child = path
         };
     }
 
     public static StackPanel Labeled(string label, string geometry)
     {
+        var text = new TextBlock
+        {
+            Text = label,
+            FontWeight = FontWeights.SemiBold,
+            Margin = new Thickness(8, 0, 0, 0),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        text.SetResourceReference(TextBlock.ForegroundProperty, "Text0Brush");
         return new StackPanel
         {
             Orientation = System.Windows.Controls.Orientation.Horizontal,
@@ -51,14 +61,7 @@ internal static class IconFactory
             Children =
             {
                 Create(geometry, 15),
-                new TextBlock
-                {
-                    Text = label,
-                    Foreground = System.Windows.Media.Brushes.Black,
-                    FontWeight = FontWeights.SemiBold,
-                    Margin = new Thickness(8, 0, 0, 0),
-                    VerticalAlignment = VerticalAlignment.Center
-                }
+                text
             }
         };
     }

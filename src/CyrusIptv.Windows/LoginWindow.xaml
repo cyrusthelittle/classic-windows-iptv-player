@@ -6,6 +6,8 @@
         MinWidth="720" MinHeight="600"
         WindowStartupLocation="CenterScreen"
         ResizeMode="CanResize"
+        PreviewKeyDown="Window_PreviewKeyDown"
+        Loaded="Window_Loaded"
         Background="{StaticResource Bg0Brush}">
     <Grid Margin="28">
         <Border Background="{StaticResource PanelBrush}" CornerRadius="22" BorderBrush="{StaticResource StrokeBrush}" BorderThickness="1" Padding="28">
@@ -16,9 +18,15 @@
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
-                <StackPanel>
-                    <TextBlock Text="Cyrus IPTV" FontSize="32" FontWeight="Bold" />
-                    <TextBlock Text="Modern Windows player shell" Foreground="{StaticResource Text2Brush}" Margin="0,6,0,0" />
+                <StackPanel Orientation="Horizontal">
+                    <Image Source="Assets/iptv-logo.png"
+                           Width="76" Height="76"
+                           Margin="0,0,18,0"
+                           Stretch="Uniform" />
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="Cyrus IPTV" FontSize="32" FontWeight="Bold" />
+                        <TextBlock Text="Modern Windows player shell" Foreground="{StaticResource Text2Brush}" Margin="0,6,0,0" />
+                    </StackPanel>
                 </StackPanel>
 
                 <Grid Grid.Row="1" Margin="0,24,0,18">
@@ -55,14 +63,27 @@
                         <TextBlock Text="Account Name" Foreground="{StaticResource Text1Brush}" Margin="0,0,0,6" />
                         <TextBox x:Name="AccountNameBox" Height="38" Margin="0,0,0,14" />
 
-                        <TextBlock Text="Server URL" Foreground="{StaticResource Text1Brush}" Margin="0,0,0,6" />
-                        <TextBox x:Name="ServerUrlBox" Height="38" Margin="0,0,0,14" />
+                        <TextBlock Text="Account Type" Foreground="{StaticResource Text1Brush}" Margin="0,0,0,6" />
+                        <ComboBox x:Name="AccountTypeBox" Height="38" Margin="0,0,0,14" SelectionChanged="AccountTypeBox_SelectionChanged">
+                            <ComboBoxItem Content="Server URL, username and password" />
+                            <ComboBoxItem Content="M3U playlist URL" />
+                        </ComboBox>
 
-                        <TextBlock Text="Username" Foreground="{StaticResource Text1Brush}" Margin="0,0,0,6" />
-                        <TextBox x:Name="UsernameBox" Height="38" Margin="0,0,0,14" />
+                        <StackPanel x:Name="XtreamFieldsPanel">
+                            <TextBlock Text="Server URL" Foreground="{StaticResource Text1Brush}" Margin="0,0,0,6" />
+                            <TextBox x:Name="ServerUrlBox" Height="38" Margin="0,0,0,14" />
 
-                        <TextBlock Text="Password" Foreground="{StaticResource Text1Brush}" Margin="0,0,0,6" />
-                        <PasswordBox x:Name="PasswordBox" Height="38" Margin="0,0,0,14" />
+                            <TextBlock Text="Username" Foreground="{StaticResource Text1Brush}" Margin="0,0,0,6" />
+                            <TextBox x:Name="UsernameBox" Height="38" Margin="0,0,0,14" />
+
+                            <TextBlock Text="Password" Foreground="{StaticResource Text1Brush}" Margin="0,0,0,6" />
+                            <PasswordBox x:Name="PasswordBox" Height="38" Margin="0,0,0,14" />
+                        </StackPanel>
+
+                        <StackPanel x:Name="M3uFieldsPanel" Visibility="Collapsed">
+                            <TextBlock Text="M3U Playlist URL" Foreground="{StaticResource Text1Brush}" Margin="0,0,0,6" />
+                            <TextBox x:Name="M3uUrlBox" Height="38" Margin="0,0,0,14" />
+                        </StackPanel>
 
                         <Button Style="{StaticResource GhostButton}" Content="Save Account" Height="36" Margin="0,0,0,14" Click="SaveAccount_Click" />
                         <CheckBox x:Name="UpdatePlaylistCheck" Content="Update playlist before opening" Foreground="{StaticResource Text1Brush}" IsChecked="True" />
@@ -78,7 +99,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <Button Grid.Column="1" Style="{StaticResource GhostButton}" Content="Cancel" Width="110" Margin="0,0,10,0" Click="Cancel_Click" />
-                    <Button Grid.Column="2" Style="{StaticResource PrimaryButton}" Content="Continue" Width="130" Click="Continue_Click" />
+                    <Button Grid.Column="2" Style="{StaticResource PrimaryButton}" Content="Continue" Width="130" IsDefault="True" Click="Continue_Click" />
                 </Grid>
             </Grid>
         </Border>
