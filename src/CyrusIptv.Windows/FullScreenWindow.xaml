@@ -10,8 +10,7 @@
         ShowInTaskbar="False"
         KeyDown="Window_KeyDown"
         MouseMove="Window_MouseMove"
-        MouseLeftButtonDown="Window_MouseLeftButtonDown"
-        PreviewMouseWheel="Window_PreviewMouseWheel">
+        MouseLeftButtonDown="Window_MouseLeftButtonDown">
     <Grid x:Name="RootGrid" Background="Black" MouseMove="Window_MouseMove" MouseLeftButtonDown="Window_MouseLeftButtonDown">
         <Grid.ContextMenu>
             <ContextMenu>
@@ -28,7 +27,8 @@
             <Border Background="#01000000"
                     MouseMove="Window_MouseMove"
                     MouseLeftButtonDown="Window_MouseLeftButtonDown"
-                    MouseRightButtonUp="Window_MouseRightButtonUp" />
+                    MouseRightButtonUp="Window_MouseRightButtonUp"
+                    MouseWheel="Overlay_MouseWheel" />
         </vlc:VideoView>
 
         <Border x:Name="ControlsOverlay"

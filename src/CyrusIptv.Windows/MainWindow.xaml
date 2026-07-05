@@ -9,8 +9,7 @@
         WindowState="Maximized"
         Background="{DynamicResource Bg0Brush}"
         KeyDown="Window_KeyDown"
-        MouseMove="Window_MouseMove"
-        PreviewMouseWheel="Window_PreviewMouseWheel">
+        MouseMove="Window_MouseMove">
     <Grid x:Name="RootGrid">
         <Grid.RowDefinitions>
             <RowDefinition x:Name="TopMenuRow" Height="48" />
@@ -65,6 +64,9 @@
                         <MenuItem Header="70%" Tag="0.7" Click="SetOsdOpacity_Click" />
                         <MenuItem Header="60%" Tag="0.6" Click="SetOsdOpacity_Click" />
                     </MenuItem>
+            </MenuItem>
+            <MenuItem Header="Help">
+                <MenuItem Header="About" Click="About_Click" />
             </MenuItem>
         </Menu>
 
@@ -237,7 +239,8 @@
                             <Border Background="#01000000"
                                     MouseLeftButtonDown="VideoHost_MouseLeftButtonDown"
                                     MouseRightButtonUp="VideoHost_MouseRightButtonUp"
-                                    MouseMove="Window_MouseMove" />
+                                    MouseMove="Window_MouseMove"
+                                    MouseWheel="VideoOverlay_MouseWheel" />
                         </vlc:VideoView>
                     </Grid>
                 </Border>

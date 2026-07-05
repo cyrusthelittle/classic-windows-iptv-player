@@ -2,6 +2,7 @@ using LibVLCSharp.Shared;
 using System;
 using System.Windows;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Threading;
 using KeyEventArgs = System.Windows.Input.KeyEventArgs;
 using MessageBox = System.Windows.MessageBox;
@@ -169,12 +170,40 @@ public partial class FullScreenWindow : Window
         e.Handled = true;
     }
 
-    private void Window_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
+    private const int WM_MOUSEWHEEL = 0x020A;
+
+    protected override void OnSourceInitialized(EventArgs e)
     {
-        if (e.Delta > 0) _setVolume((int)Math.Min(150, VolumeSlider.Value + 5));
+        base.OnSourceInitialized(e);
+        (PresentationSource.FromVisual(this) as HwndSource)?.AddHook(VideoWheelWndProc);
+    }
+
+    private IntPtr VideoWheelWndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        // Fallback for wheel messages that reach this window itself. During playback the
+        // overlay Border inside FullVideoView (hosted by LibVLCSharp in a floating window
+        // above the video) receives the wheel instead — see Overlay_MouseWheel.
+        if (msg == WM_MOUSEWHEEL)
+        {
+            var delta = unchecked((short)((wParam.ToInt64() >> 16) & 0xFFFF));
+            ApplyVolumeWheel(delta);
+            handled = true;
+        }
+
+        return IntPtr.Zero;
+    }
+
+    private void Overlay_MouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
+    {
+        ApplyVolumeWheel(e.Delta);
+        e.Handled = true;
+    }
+
+    private void ApplyVolumeWheel(int delta)
+    {
+        if (delta > 0) _setVolume((int)Math.Min(150, VolumeSlider.Value + 5));
         else _setVolume((int)Math.Max(0, VolumeSlider.Value - 5));
         ShowControlsTemporarily();
-        e.Handled = true;
     }
 
     private void Window_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)

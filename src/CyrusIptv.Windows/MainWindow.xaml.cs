@@ -2,12 +2,14 @@
 using LibVLCSharp.Shared;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Threading;
 using Clipboard = System.Windows.Clipboard;
 using KeyEventArgs = System.Windows.Input.KeyEventArgs;
@@ -185,7 +187,16 @@ public partial class MainWindow : Window
                 "--live-caching=" + buffer,
                 "--file-caching=" + buffer,
                 "--http-reconnect");
-            return (libVlc, new MediaPlayer(libVlc));
+            var mediaPlayer = new MediaPlayer(libVlc)
+            {
+                // LibVLC's own video output handles mouse input by default (e.g. wheel
+                // adjusts its internal volume, double-click toggles fullscreen), which
+                // consumes the input before it ever reaches our WPF window. Disabling it
+                // lets our own wheel/click handling see those events instead.
+                EnableMouseInput = false,
+                EnableKeyInput = false
+            };
+            return (libVlc, mediaPlayer);
         });
 
         ApplySavedAudioState();
@@ -1612,18 +1623,51 @@ public partial class MainWindow : Window
         e.Handled = true;
     }
 
-    private void Window_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
-    {
-        // MouseWheel routes via keyboard focus, not cursor position, so this has to be
-        // handled at the window (tunneling) and hit-tested manually against VideoHost's
-        // bounds to scope it to the playback area without blocking scrolling elsewhere
-        // (e.g. the channel list).
-        var pos = e.GetPosition(VideoHost);
-        if (pos.X < 0 || pos.Y < 0 || pos.X > VideoHost.ActualWidth || pos.Y > VideoHost.ActualHeight) return;
+    private const int WM_MOUSEWHEEL = 0x020A;
 
-        SetVolume(_state.VolumeLevel + (e.Delta > 0 ? 5 : -5));
-        ShowControls();
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        (PresentationSource.FromVisual(this) as HwndSource)?.AddHook(VideoWheelWndProc);
+    }
+
+    private IntPtr VideoWheelWndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        // Covers the idle state (VideoView collapsed): the wheel message arrives at this
+        // window, so hit-test the cursor against VideoHost's bounds. During playback the
+        // overlay hosted inside VideoView receives the wheel instead (LibVLCSharp renders
+        // that overlay in its own floating window above the video), which is handled by
+        // VideoOverlay_MouseWheel — this hook then never sees the message, so the two
+        // paths cannot double-fire.
+        if (msg == WM_MOUSEWHEEL)
+        {
+            var screenPoint = new Point(unchecked((short)(lParam.ToInt64() & 0xFFFF)), unchecked((short)((lParam.ToInt64() >> 16) & 0xFFFF)));
+            var pos = VideoHost.PointFromScreen(screenPoint);
+            if (pos.X >= 0 && pos.Y >= 0 && pos.X <= VideoHost.ActualWidth && pos.Y <= VideoHost.ActualHeight)
+            {
+                var delta = unchecked((short)((wParam.ToInt64() >> 16) & 0xFFFF));
+                ApplyVolumeWheel(delta);
+                handled = true;
+            }
+        }
+
+        return IntPtr.Zero;
+    }
+
+    private void VideoOverlay_MouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
+    {
+        // Raised via the transparent overlay Border inside VideoView, which LibVLCSharp
+        // hosts in a separate floating window above the native video surface — during
+        // playback the cursor is over that window, so wheel input lands here and never
+        // reaches MainWindow's message hook.
+        ApplyVolumeWheel(e.Delta);
         e.Handled = true;
+    }
+
+    private void ApplyVolumeWheel(int delta)
+    {
+        SetVolume(_state.VolumeLevel + (delta > 0 ? 5 : -5));
+        ShowControls();
     }
 
     private void Window_MouseMove(object sender, System.Windows.Input.MouseEventArgs e) => ShowControls();
@@ -1846,6 +1890,26 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             MessageBox.Show(this, ex.Message, "Account information error", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private const string GitHubProjectUrl = "https://github.com/cyrusthelittle/cyrus-iptv";
+
+    private void About_Click(object sender, RoutedEventArgs e)
+    {
+        var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+        var versionText = version is null ? "unknown" : version.ToString(3);
+
+        var result = MessageBox.Show(
+            this,
+            $"Cyrus IPTV Modern\nVersion {versionText}\n\n{GitHubProjectUrl}\n\nOpen the project page on GitHub?",
+            "About",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Information);
+
+        if (result == MessageBoxResult.Yes)
+        {
+            Process.Start(new ProcessStartInfo(GitHubProjectUrl) { UseShellExecute = true });
         }
     }
 
