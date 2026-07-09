@@ -14,12 +14,6 @@ public sealed class ConfigStore
         PropertyNameCaseInsensitive = true
     };
 
-    private static readonly JsonSerializerOptions CacheJsonOptions = new()
-    {
-        WriteIndented = false,
-        PropertyNameCaseInsensitive = true
-    };
-
     private readonly string _appFolder;
     private readonly string _statePath;
     private readonly string _channelCachePath;
@@ -82,7 +76,7 @@ public sealed class ConfigStore
             if (!HasChannelCache) return [];
             using var file = File.OpenRead(_channelCachePath);
             using var gzip = new GZipStream(file, CompressionMode.Decompress);
-            return JsonSerializer.Deserialize<List<Channel>>(gzip, CacheJsonOptions) ?? [];
+            return JsonSerializer.Deserialize(gzip, ChannelJsonContext.Default.ListChannel) ?? [];
         }
         catch
         {
@@ -103,7 +97,7 @@ public sealed class ConfigStore
 
             using var file = File.OpenRead(path);
             using var gzip = new GZipStream(file, CompressionMode.Decompress);
-            return JsonSerializer.Deserialize<List<Channel>>(gzip, CacheJsonOptions) ?? [];
+            return JsonSerializer.Deserialize(gzip, ChannelJsonContext.Default.ListChannel) ?? [];
         }
         catch
         {
@@ -118,7 +112,7 @@ public sealed class ConfigStore
         using (var file = File.Create(tmpPath))
         using (var gzip = new GZipStream(file, CompressionLevel.Fastest))
         {
-            JsonSerializer.Serialize(gzip, channels, CacheJsonOptions);
+            JsonSerializer.Serialize(gzip, AsList(channels), ChannelJsonContext.Default.ListChannel);
         }
 
         if (File.Exists(_channelCachePath)) File.Delete(_channelCachePath);
@@ -133,12 +127,14 @@ public sealed class ConfigStore
         using (var file = File.Create(tmpPath))
         using (var gzip = new GZipStream(file, CompressionLevel.Fastest))
         {
-            JsonSerializer.Serialize(gzip, channels, CacheJsonOptions);
+            JsonSerializer.Serialize(gzip, AsList(channels), ChannelJsonContext.Default.ListChannel);
         }
 
         if (File.Exists(path)) File.Delete(path);
         File.Move(tmpPath, path);
     }
+
+    private static List<Channel> AsList(IReadOnlyList<Channel> channels) => channels as List<Channel> ?? [.. channels];
 
     public void ClearChannelCache()
     {

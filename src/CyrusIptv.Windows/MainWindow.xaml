@@ -51,6 +51,13 @@
                 <MenuItem Header="Buffer 6 sec" Click="Buffer6_Click" />
                 <MenuItem Header="Buffer 10 sec" Click="Buffer10_Click" />
                     <Separator />
+                    <MenuItem Header="Reconnect attempts">
+                        <MenuItem Header="5 attempts" Click="Reconnect5_Click" />
+                        <MenuItem Header="10 attempts (default)" Click="Reconnect10_Click" />
+                        <MenuItem Header="15 attempts" Click="Reconnect15_Click" />
+                        <MenuItem Header="20 attempts" Click="Reconnect20_Click" />
+                    </MenuItem>
+                    <Separator />
                     <MenuItem x:Name="DarkModeMenuItem" Header="Dark mode" IsCheckable="True" Click="ToggleDarkMode_Click" />
                     <Separator />
                     <MenuItem Header="Remote control on/off" Click="ToggleRemoteControl_Click" />
@@ -66,6 +73,7 @@
                     </MenuItem>
             </MenuItem>
             <MenuItem Header="Help">
+                <MenuItem Header="GitHub" Click="GitHub_Click" />
                 <MenuItem Header="About" Click="About_Click" />
             </MenuItem>
         </Menu>

@@ -59,14 +59,11 @@ public partial class MainWindow : Window
     private bool _isFullScreen;
     private bool _cursorHidden;
     private bool _channelsVisibleBeforeFullScreen = true;
-    private bool _isSwitchingChannel;
-    private bool _isPausedByUser;
     private bool _isShuttingDown;
     // XAML initializes the slider to 100 before the saved value is restored. Keep
     // its ValueChanged event from overwriting the persisted volume during startup.
     private bool _suppressVolumeChange = true;
     private bool _suppressChannelSelectionChange;
-    private bool _isHandlingPlaybackError;
     private bool _isChangingAccount;
     private DateTime? _livePauseStartedUtc;
     private TimeSpan _liveBehind = TimeSpan.Zero;
@@ -88,6 +85,9 @@ public partial class MainWindow : Window
     private double _heightBeforeFullScreen;
     private CancellationTokenSource? _filterCts;
     private CancellationTokenSource? _sourceProbeCts;
+    // All stream startup, monitoring and recovery lives in the tuner; this
+    // window only renders the states it reports and hosts the video surface.
+    private ChannelTuner? _tuner;
 
     public MainWindow(LoginResult login)
     {
@@ -158,11 +158,20 @@ public partial class MainWindow : Window
             // any native player initialization or playlist work starts.
             await Dispatcher.Yield(DispatcherPriority.ContextIdle);
 
-            await InitializePlayerAsync();
+            // LibVLC's native startup and reading the cached playlist off disk
+            // are independent of each other, so run them side by side instead
+            // of making one wait behind the other -- this is most of the win
+            // on a cached-playlist launch, where the playlist load is fast but
+            // used to sit behind the (slower) player init anyway.
+            var playerTask = InitializePlayerAsync();
+            var channelsTask = LoadChannelsAsync(_login.UpdatePlaylist);
+
+            await playerTask;
             InitializeBufferBox();
             InitializeVolumeControls();
             ApplyRemoteControlState(showStatus: false);
-            await LoadChannelsAsync(_login.UpdatePlaylist);
+
+            await channelsTask;
         }
         catch (Exception ex)
         {
@@ -177,59 +186,151 @@ public partial class MainWindow : Window
     {
         AppLogger.Info("Initializing LibVLC player. bufferMs=" + GetPlaybackBufferMs() + "; volume=" + _state.VolumeLevel + "; muted=" + _state.Muted);
         var buffer = GetPlaybackBufferMs();
-        (_libVlc, _mediaPlayer) = await Task.Run(() =>
+        _libVlc = await Task.Run(() =>
         {
             LibVLCSharp.Shared.Core.Initialize();
-            var libVlc = new LibVLC(
+            return new LibVLC(
                 "--no-video-title-show",
                 "--avcodec-hw=none",
                 "--network-caching=" + buffer,
                 "--live-caching=" + buffer,
                 "--file-caching=" + buffer,
                 "--http-reconnect");
-            var mediaPlayer = new MediaPlayer(libVlc)
-            {
-                // LibVLC's own video output handles mouse input by default (e.g. wheel
-                // adjusts its internal volume, double-click toggles fullscreen), which
-                // consumes the input before it ever reaches our WPF window. Disabling it
-                // lets our own wheel/click handling see those events instead.
-                EnableMouseInput = false,
-                EnableKeyInput = false
-            };
-            return (libVlc, mediaPlayer);
         });
 
-        ApplySavedAudioState();
-        _mediaPlayer.Playing += (_, _) => Dispatcher.BeginInvoke(new Action(() =>
+        // Record native player errors (HTTP status, demux failures, ...) so failed
+        // tune attempts in the app log show the server's actual refusal reason.
+        _libVlc.Log += (_, e) =>
         {
-            AppLogger.Info("MediaPlayer event: Playing. " + AppLogger.DescribeChannel(_currentChannel));
+            if (e.Level < LibVLCSharp.Shared.LogLevel.Error) return;
+            AppLogger.Warn("libvlc " + (e.Module ?? "core") + ": " + e.Message);
+        };
+
+        _tuner = new ChannelTuner(_libVlc) { MaxAttempts = GetReconnectAttempts() };
+        _tuner.PlayerAttached += OnTunerPlayerAttached;
+        _tuner.PlayerDetaching += OnTunerPlayerDetaching;
+        _tuner.StateChanged += OnTunerStateChanged;
+        _positionTimer.Start();
+        RefreshSubtitleTracks();
+    }
+
+    // Called by the tuner on its worker thread, synchronously before Play, so the
+    // player must be bound to the video surface before this returns.
+    private void OnTunerPlayerAttached(MediaPlayer player, Media media, TuneRequest request)
+    {
+        Dispatcher.Invoke(() =>
+        {
+            if (_isShuttingDown) return;
+            // Under rapid zapping, attach callbacks can reach the UI thread out of
+            // order; only the tuner's current player may own the video surface.
+            if (!ReferenceEquals(player, _tuner?.CurrentPlayer)) return;
+            _mediaPlayer = player;
+            _currentMedia = media;
+
+            // The video view is collapsed while idle and its native host window is
+            // only created by a layout pass. Binding before that window exists
+            // leaves the player without a render target, and LibVLC would open the
+            // video in its own floating window. Force the layout now and verify
+            // the player really received a window handle before it starts playing.
+            HideIdleBackground();
+            VideoView.UpdateLayout();
+            VideoView.MediaPlayer = player;
+            if (player.Hwnd == IntPtr.Zero)
+            {
+                VideoView.MediaPlayer = null;
+                VideoView.UpdateLayout();
+                VideoView.MediaPlayer = player;
+                AppLogger.Warn("Video surface was not ready on attach; rebound player. hwndSet=" + (player.Hwnd != IntPtr.Zero));
+            }
+
+            AttachUiEventHandlers(player);
+            ApplySavedAudioState();
+        });
+    }
+
+    // Called by the tuner before it tears a player down; every reference to it —
+    // above all the video view binding — must be gone before this returns, because
+    // detaching later would touch the disposed player's native handle and crash.
+    private void OnTunerPlayerDetaching(MediaPlayer player)
+    {
+        try
+        {
+            Dispatcher.Invoke(() =>
+            {
+                if (_isShuttingDown) return;
+                if (ReferenceEquals(VideoView.MediaPlayer, player)) VideoView.MediaPlayer = null;
+                if (ReferenceEquals(_mediaPlayer, player))
+                {
+                    _mediaPlayer = null;
+                    _currentMedia = null;
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            // Dispatcher may already be shutting down; the tuner proceeds either way.
+            AppLogger.Warn("Player detach handler failed. " + ex.Message);
+        }
+    }
+
+    // UI-only reactions to the active player. Recovery is the tuner's job; these
+    // handlers ignore events from players the tuner has already replaced.
+    private void AttachUiEventHandlers(MediaPlayer player)
+    {
+        player.Playing += (_, _) => Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (!ReferenceEquals(player, _mediaPlayer)) return;
             PlayPauseButton.Content = IconFactory.Create(IconFactory.Pause);
             HideIdleBackground();
             RefreshSubtitleTracks();
             ShowControls();
             UpdateStreamInfo();
         }));
-        _mediaPlayer.Paused += (_, _) => Dispatcher.BeginInvoke(new Action(() =>
+        player.Paused += (_, _) => Dispatcher.BeginInvoke(new Action(() =>
         {
-            AppLogger.Info("MediaPlayer event: Paused. " + AppLogger.DescribeChannel(_currentChannel));
+            if (!ReferenceEquals(player, _mediaPlayer)) return;
             PlayPauseButton.Content = IconFactory.Create(IconFactory.Play);
         }));
-        _mediaPlayer.Stopped += (_, _) => Dispatcher.BeginInvoke(new Action(() =>
+        player.Stopped += (_, _) => Dispatcher.BeginInvoke(new Action(() =>
         {
-            AppLogger.Info("MediaPlayer event: Stopped. " + AppLogger.DescribeChannel(_currentChannel));
+            if (!ReferenceEquals(player, _mediaPlayer)) return;
             PlayPauseButton.Content = IconFactory.Create(IconFactory.Play);
-            // Stop also fires while switching channels; by the time this dispatched
-            // action runs the next stream may already be playing.
             if (_mediaPlayer?.IsPlaying != true) ShowIdleBackground();
         }));
-        _mediaPlayer.EncounteredError += (_, _) => Dispatcher.BeginInvoke(new Action(() =>
+    }
+
+    private void OnTunerStateChanged(TunerStateSnapshot snapshot)
+    {
+        Dispatcher.BeginInvoke(new Action(() =>
         {
-            AppLogger.Warn("MediaPlayer event: EncounteredError. candidate=" + GetCurrentCandidateLogText() + "; " + AppLogger.DescribeChannel(_currentChannel));
-            _ = HandlePlaybackErrorAsync();
+            if (_isShuttingDown) return;
+            // A state for a channel the user has already zapped away from is stale.
+            if (snapshot.Request is not null && _currentChannel is not null &&
+                !string.Equals(snapshot.Request.ChannelId, _currentChannel.Id, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            switch (snapshot.Status)
+            {
+                case TunerStatus.Tuning:
+                    StatusText.Text = snapshot.Attempt <= 1
+                        ? "Opening: " + snapshot.Request?.ChannelName
+                        : $"Reconnecting ({snapshot.Attempt}/{snapshot.MaxAttempts}): {snapshot.Request?.ChannelName}";
+                    break;
+                case TunerStatus.Playing:
+                    StatusText.Text = "Playing: " + snapshot.Request?.ChannelName + " • " + snapshot.Request?.SourceLabel;
+                    UpdateStreamInfo();
+                    break;
+                case TunerStatus.Ended:
+                    StatusText.Text = "Finished: " + snapshot.Request?.ChannelName;
+                    break;
+                case TunerStatus.Failed:
+                    StatusText.Text = "Could not start the stream. " + (snapshot.Detail ?? string.Empty);
+                    UpdateStreamInfo();
+                    break;
+            }
         }));
-        VideoView.MediaPlayer = _mediaPlayer;
-        _positionTimer.Start();
-        RefreshSubtitleTracks();
     }
 
     private void InitializeButtonIcons()
@@ -774,19 +875,14 @@ public partial class MainWindow : Window
 
     private void PlayChannel(Channel channel, int? autoCandidateIndex = null)
     {
-        PlayChannel(channel, autoCandidateIndex, resumeTimeMs: null, stopBeforePlay: true);
+        PlayChannel(channel, autoCandidateIndex, resumeTimeMs: null);
     }
 
     private void PlayChannel(Channel channel, int? autoCandidateIndex, long? resumeTimeMs)
     {
-        PlayChannel(channel, autoCandidateIndex, resumeTimeMs, stopBeforePlay: true);
-    }
-
-    private void PlayChannel(Channel channel, int? autoCandidateIndex, long? resumeTimeMs, bool stopBeforePlay)
-    {
         try
         {
-            AppLogger.Info("PlayChannel begin. requestedIndex=" + (autoCandidateIndex?.ToString() ?? "auto") + "; resumeTimeMs=" + (resumeTimeMs?.ToString() ?? "none") + "; stopBeforePlay=" + stopBeforePlay + "; " + AppLogger.DescribeChannel(channel));
+            AppLogger.Info("PlayChannel begin. requestedIndex=" + (autoCandidateIndex?.ToString() ?? "auto") + "; resumeTimeMs=" + (resumeTimeMs?.ToString() ?? "none") + "; " + AppLogger.DescribeChannel(channel));
             if (resumeTimeMs is null) ClearPauseResumeState();
             if (_currentChannel is null || !string.Equals(_currentChannel.Id, channel.Id, StringComparison.OrdinalIgnoreCase))
             {
@@ -806,7 +902,7 @@ public partial class MainWindow : Window
                 return;
             }
 
-            if (_libVlc is null || _mediaPlayer is null)
+            if (_tuner is null)
             {
                 AppLogger.Warn("PlayChannel aborted: player not initialized. " + AppLogger.DescribeChannel(channel));
                 StatusText.Text = "Player is not initialized yet.";
@@ -814,56 +910,26 @@ public partial class MainWindow : Window
             }
 
             AppLogger.Info("Selected playback candidate. " + GetCandidateLogText(candidate, _currentCandidateIndex));
-            var previousMedia = _currentMedia;
-            var nextMedia = new Media(_libVlc, candidate.Url, FromType.FromLocation);
-            var buffer = GetPlaybackBufferMs();
-            nextMedia.AddOption(":network-caching=" + buffer);
-            nextMedia.AddOption(":live-caching=" + buffer);
-            nextMedia.AddOption(":file-caching=" + buffer);
-            nextMedia.AddOption(":http-reconnect");
-
             _streamInfoTracker.ResetBandwidth();
-            if (stopBeforePlay)
-            {
-                _isSwitchingChannel = true;
-                try
-                {
-                    AppLogger.Info("Stopping current media before switch.");
-                    _mediaPlayer.Stop();
-                }
-                catch (Exception ex)
-                {
-                    // Some providers leave the native player in a transient state while switching.
-                    AppLogger.Warn("MediaPlayer.Stop failed while switching. " + ex.Message);
-                }
-                finally
-                {
-                    _isSwitchingChannel = false;
-                }
-            }
-            else
-            {
-                AppLogger.Info("Skipping MediaPlayer.Stop before retry because playback is recovering from an error.");
-            }
-
-            _currentMedia = nextMedia;
+            NowPlayingText.Text = channel.Name;
+            StatusText.Text = "Opening: " + channel.Name;
             HideIdleBackground();
-            var playStarted = _mediaPlayer.Play(_currentMedia);
-            AppLogger.Info("MediaPlayer.Play called. started=" + playStarted + "; " + GetCurrentCandidateLogText());
-            ApplySavedAudioState();
+            AddRecent(channel);
+            ShowControls();
+
+            _tuner.Play(new TuneRequest(
+                channel.Id,
+                channel.Name,
+                candidate.Url,
+                candidate.Label,
+                channel.MediaKind == MediaKind.Live,
+                GetPlaybackBufferMs()));
+
             if (resumeTimeMs is > 0)
             {
                 QueueResumeSeek(channel.Id, resumeTimeMs.Value);
             }
-            DisposeMediaLater(previousMedia);
-            RefreshSubtitleTracks();
-            NowPlayingText.Text = channel.Name;
-            StatusText.Text = "Playing: " + channel.Name + " • " + candidate.Label;
-            AddRecent(channel);
-            ShowControls();
-            UpdateStreamInfo();
             StartBackgroundSourceProbe(channel, _currentCandidates);
-            AppLogger.Info("PlayChannel complete. " + AppLogger.DescribeChannel(channel));
         }
         catch (Exception ex)
         {
@@ -953,52 +1019,9 @@ public partial class MainWindow : Window
             : _currentCandidates[0];
     }
 
-    private string GetCurrentCandidateLogText()
-    {
-        var candidate = GetCurrentPlaybackCandidate();
-        return candidate is null ? "candidate=none" : GetCandidateLogText(candidate, _currentCandidateIndex);
-    }
-
     private static string GetCandidateLogText(PlaybackCandidate candidate, int index)
     {
         return $"candidateIndex={index}; label={candidate.Label}; url={AppLogger.SanitizeUrl(candidate.Url)}";
-    }
-
-    private async Task HandlePlaybackErrorAsync()
-    {
-        if (_isPausedByUser) return;
-        if (_isSwitchingChannel) return;
-        if (_isHandlingPlaybackError)
-        {
-            AppLogger.Warn("Playback error ignored because another error recovery is already in progress. " + AppLogger.DescribeChannel(_currentChannel));
-            return;
-        }
-
-        _isHandlingPlaybackError = true;
-        try
-        {
-            await Task.Delay(350);
-            if (_isShuttingDown || _isPausedByUser || _isSwitchingChannel) return;
-
-            if (_currentChannel is not null && _currentCandidateIndex + 1 < _currentCandidates.Count)
-            {
-                var channel = _currentChannel;
-                var nextIndex = _currentCandidateIndex + 1;
-                AppLogger.Warn("Playback error. Trying next candidate. nextIndex=" + nextIndex + "; " + AppLogger.DescribeChannel(channel));
-                StatusText.Text = $"Stream failed. Trying next format ({nextIndex + 1}/{_currentCandidates.Count})...";
-                if (channel.MediaKind == MediaKind.Live) ClearLiveDelay();
-                PlayChannel(channel, nextIndex, resumeTimeMs: null, stopBeforePlay: false);
-                return;
-            }
-
-            AppLogger.Warn("Playback error on playlist URL. " + AppLogger.DescribeChannel(_currentChannel));
-            StatusText.Text = "Playback error on playlist URL.";
-            UpdateStreamInfo();
-        }
-        finally
-        {
-            _isHandlingPlaybackError = false;
-        }
     }
 
     private void AddRecent(Channel channel)
@@ -1043,7 +1066,7 @@ public partial class MainWindow : Window
                 timeMs);
         }
 
-        _isPausedByUser = true;
+        _tuner?.NotifyUserPaused();
 
         try
         {
@@ -1068,11 +1091,13 @@ public partial class MainWindow : Window
 
         var snapshot = _pausedPlayback;
         _pausedPlayback = null;
-        _isPausedByUser = false;
+        _tuner?.NotifyUserResumed();
 
         try
         {
-            _mediaPlayer.Play();
+            // The connection may have died while paused (providers drop idle
+            // streams); a refused resume falls through to a fresh tune below.
+            if (!_mediaPlayer.Play()) throw new InvalidOperationException("The player could not resume the stream.");
             FinishLivePauseTracking();
             PlayPauseButton.Content = IconFactory.Create(IconFactory.Pause);
             StatusText.Text = "Resuming: " + snapshot.Channel.Name;
@@ -1147,7 +1172,7 @@ public partial class MainWindow : Window
     private void ClearPauseResumeState()
     {
         _pausedPlayback = null;
-        _isPausedByUser = false;
+        _tuner?.NotifyUserResumed();
         _pendingResumeTimeMs = null;
         _pendingResumeChannelId = string.Empty;
         _pendingResumeSeekAttempts = 0;
@@ -1200,35 +1225,10 @@ public partial class MainWindow : Window
     {
         ClearPauseResumeState();
         ClearLiveDelay();
-        try
-        {
-            _mediaPlayer?.Stop();
-        }
-        catch (Exception ex)
-        {
-            StatusText.Text = "Stop failed: " + ex.Message;
-        }
-
+        // The tuner supersedes any in-flight tune/retry cycle and retires the
+        // active player, so nothing can restart playback after an explicit stop.
+        _tuner?.Stop();
         UpdateStreamInfo();
-    }
-
-    private void DisposeMediaLater(Media? media)
-    {
-        if (media is null) return;
-        _ = Task.Delay(2500).ContinueWith(_ =>
-        {
-            Dispatcher.BeginInvoke(new Action(() =>
-            {
-                try
-                {
-                    if (!ReferenceEquals(media, _currentMedia)) media.Dispose();
-                }
-                catch
-                {
-                    // Ignore native cleanup races while switching streams.
-                }
-            }));
-        }, TaskScheduler.Default);
     }
 
     private void Previous_Click(object sender, RoutedEventArgs e) => PlayRelative(-1);
@@ -1900,17 +1900,17 @@ public partial class MainWindow : Window
         var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
         var versionText = version is null ? "unknown" : version.ToString(3);
 
-        var result = MessageBox.Show(
+        MessageBox.Show(
             this,
-            $"Cyrus IPTV Modern\nVersion {versionText}\n\n{GitHubProjectUrl}\n\nOpen the project page on GitHub?",
+            $"Cyrus IPTV Modern\nVersion {versionText}",
             "About",
-            MessageBoxButton.YesNo,
+            MessageBoxButton.OK,
             MessageBoxImage.Information);
+    }
 
-        if (result == MessageBoxResult.Yes)
-        {
-            Process.Start(new ProcessStartInfo(GitHubProjectUrl) { UseShellExecute = true });
-        }
+    private void GitHub_Click(object sender, RoutedEventArgs e)
+    {
+        Process.Start(new ProcessStartInfo(GitHubProjectUrl) { UseShellExecute = true });
     }
 
     private async void ChangeAccount_Click(object sender, RoutedEventArgs e)
@@ -2032,6 +2032,27 @@ public partial class MainWindow : Window
     {
         var value = _state.PlaybackBufferMs <= 0 ? 1000 : _state.PlaybackBufferMs;
         return Math.Max(500, Math.Min(30000, value));
+    }
+
+    private void Reconnect5_Click(object sender, RoutedEventArgs e) => SetReconnectAttempts(5);
+    private void Reconnect10_Click(object sender, RoutedEventArgs e) => SetReconnectAttempts(10);
+    private void Reconnect15_Click(object sender, RoutedEventArgs e) => SetReconnectAttempts(15);
+    private void Reconnect20_Click(object sender, RoutedEventArgs e) => SetReconnectAttempts(20);
+
+    private void SetReconnectAttempts(int attempts)
+    {
+        _state.ReconnectAttempts = Math.Clamp(attempts, 1, 30);
+        _store.Save(_state);
+        if (_tuner is not null) _tuner.MaxAttempts = _state.ReconnectAttempts;
+        StatusText.Text = $"Reconnect attempts set to {_state.ReconnectAttempts}.";
+        AppLogger.Info("Reconnect attempts set to " + _state.ReconnectAttempts + ".");
+    }
+
+    private int GetReconnectAttempts()
+    {
+        // Older state files (saved before this setting existed) load as 0.
+        var value = _state.ReconnectAttempts <= 0 ? 10 : _state.ReconnectAttempts;
+        return Math.Clamp(value, 1, 30);
     }
 
     private void RestartStream_Click(object sender, RoutedEventArgs e)
@@ -2329,9 +2350,11 @@ public partial class MainWindow : Window
             _controlsHideTimer.Stop();
             _volumeOsdTimer.Stop();
             _remoteControlService.Dispose();
-            _mediaPlayer?.Stop();
-            _currentMedia?.Dispose();
-            _mediaPlayer?.Dispose();
+            // The tuner owns every player/media pair; disposing it stops the active
+            // stream and waits for background teardown before LibVLC goes away.
+            _tuner?.Dispose();
+            _mediaPlayer = null;
+            _currentMedia = null;
             _libVlc?.Dispose();
         }
         catch

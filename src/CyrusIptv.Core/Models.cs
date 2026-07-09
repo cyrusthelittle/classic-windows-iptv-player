@@ -5,6 +5,15 @@ using System.Text.Json.Serialization;
 
 namespace CyrusIptv.Core;
 
+// Source-generated (de)serialization for the channel cache avoids reflection-based
+// metadata resolution, which is measurably slower once a playlist reaches the tens
+// or hundreds of thousands of channels that large IPTV providers hand out.
+[JsonSourceGenerationOptions(PropertyNameCaseInsensitive = true)]
+[JsonSerializable(typeof(List<Channel>))]
+public sealed partial class ChannelJsonContext : JsonSerializerContext
+{
+}
+
 public sealed class AccountSettings
 {
     public string ServerUrl { get; set; } = string.Empty;
@@ -103,6 +112,10 @@ public sealed class AppState
     // Playback buffer in milliseconds. Higher values reduce lag/stutter on weak or unstable networks,
     // but channel switching will take a little longer.
     public int PlaybackBufferMs { get; set; } = 1000;
+
+    // How many times a stream open is attempted before giving up. Providers that
+    // refuse the first request(s) after a channel change need a generous budget.
+    public int ReconnectAttempts { get; set; } = 10;
 
     // Saved player audio state. 100 is normal volume; LibVLC supports values above 100.
     public int VolumeLevel { get; set; } = 100;
