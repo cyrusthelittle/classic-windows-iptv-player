@@ -20,6 +20,7 @@ public sealed class AccountSettings
     public string M3uUrl { get; set; } = string.Empty;
     public string Username { get; set; } = string.Empty;
     public string Password { get; set; } = string.Empty;
+    public string EpgUrl { get; set; } = string.Empty;
     public string PreferredPlayerPath { get; set; } = string.Empty;
 
     public AccountSettings Clone() => new()
@@ -28,6 +29,7 @@ public sealed class AccountSettings
         M3uUrl = M3uUrl,
         Username = Username,
         Password = Password,
+        EpgUrl = EpgUrl,
         PreferredPlayerPath = PreferredPlayerPath
     };
 }
@@ -64,6 +66,7 @@ public sealed class Channel
     public string Name { get; set; } = string.Empty;
     public string Group { get; set; } = "Uncategorized";
     public string Logo { get; set; } = string.Empty;
+    public string EpgId { get; set; } = string.Empty;
     public string Url { get; set; } = string.Empty;
     public string RawInfo { get; set; } = string.Empty;
     public MediaKind MediaKind { get; set; } = MediaKind.Live;
@@ -131,6 +134,9 @@ public sealed class AppState
 
     // UI theme. Light stays the default so existing installs keep their look.
     public bool DarkMode { get; set; } = false;
+
+    // EPG is opt-in because some providers expose very large or unreliable XMLTV feeds.
+    public bool EpgEnabled { get; set; } = false;
 
     public SavedAccount EnsureSelectedAccount()
     {

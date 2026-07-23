@@ -125,6 +125,7 @@ public partial class LoginWindow : Window
             M3uUrl = useM3u ? M3uUrlBox.Text.Trim() : string.Empty,
             Username = useM3u ? string.Empty : UsernameBox.Text.Trim(),
             Password = useM3u ? string.Empty : PasswordBox.Password.Trim(),
+            EpgUrl = EpgUrlBox.Text.Trim(),
             PreferredPlayerPath = selected.Settings.PreferredPlayerPath
         };
 
@@ -171,6 +172,7 @@ public partial class LoginWindow : Window
         M3uUrlBox.Text = account.Settings.M3uUrl;
         UsernameBox.Text = account.Settings.Username;
         PasswordBox.Password = account.Settings.Password;
+        EpgUrlBox.Text = account.Settings.EpgUrl;
         AccountTypeBox.SelectedIndex = string.IsNullOrWhiteSpace(account.Settings.M3uUrl) ? 0 : 1;
         UpdateAccountTypeFields();
 

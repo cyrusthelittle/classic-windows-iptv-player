@@ -85,6 +85,11 @@
                             <TextBox x:Name="M3uUrlBox" Height="38" Margin="0,0,0,14" />
                         </StackPanel>
 
+                        <TextBlock Text="EPG URL (optional)" Foreground="{StaticResource Text1Brush}" Margin="0,0,0,6" />
+                        <TextBox x:Name="EpgUrlBox" Height="38" Margin="0,0,0,4" />
+                        <TextBlock Text="Leave blank to use the Xtream provider's XMLTV guide automatically."
+                                   Foreground="{StaticResource Text2Brush}" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,14" />
+
                         <Button Style="{StaticResource GhostButton}" Content="Save Account" Height="36" Margin="0,0,0,14" Click="SaveAccount_Click" />
                         <CheckBox x:Name="UpdatePlaylistCheck" Content="Update playlist before opening" Foreground="{StaticResource Text1Brush}" IsChecked="True" />
                         <TextBlock x:Name="StatusText" Text="Use cached playlist for faster startup when you only want to watch." Foreground="{StaticResource Text2Brush}" TextWrapping="Wrap" Margin="0,14,0,0" />

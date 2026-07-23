@@ -31,6 +31,7 @@ Reusable IPTV logic:
 - account settings and app state
 - playlist download and M3U/M3U Plus parsing
 - live/movie/series classification
+- XMLTV programme-guide download, parsing, and channel matching
 - account info lookup
 - stream candidate builder
 - compressed playlist cache
@@ -46,6 +47,7 @@ Windows WPF app:
 - built-in LibVLC player with full-screen window
 - stream information (state, resolution, bandwidth, bitrate, buffer, source)
 - source selector, buffer selector, VOD seek bar, volume/mute
+- current and next programme display for live channels, with full descriptions in tooltips
 - right-click playback menu (windowed and full-screen)
 - remote-control toggle
 
@@ -75,6 +77,12 @@ Keep that folder together — the EXE needs `libvlc.dll`, `libvlccore.dll`, and 
 ```bat
 scripts\RUN_WINDOWS_MODERN.bat
 ```
+
+## Programme guide (EPG)
+
+EPG is disabled by default. Turn it on with **Settings → Programme guide (EPG)**. Xtream accounts then automatically use the provider's `xmltv.php` guide. For a direct M3U account, enter an XMLTV or XMLTV `.gz` URL in the optional **EPG URL** field. The guide matches channels by `tvg-id` first and falls back to the channel/display name.
+
+The current and next programmes appear below the playback controls. Hover a programme to see its category and description. Use **Playlist → Refresh programme guide** to fetch it again without reloading the playlist.
 
 ## Troubleshooting
 

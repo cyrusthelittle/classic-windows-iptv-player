@@ -375,6 +375,7 @@ public sealed class PlaylistService
                 var name = ExtractName(currentInfo);
                 var group = ExtractAttribute(currentInfo, "group-title");
                 var logo = ExtractAttribute(currentInfo, "tvg-logo");
+                var epgId = ExtractAttribute(currentInfo, "tvg-id");
                 var tvgName = ExtractAttribute(currentInfo, "tvg-name");
 
                 if (string.IsNullOrWhiteSpace(name)) name = tvgName;
@@ -396,6 +397,7 @@ public sealed class PlaylistService
                         Name = name.Trim(),
                         Group = group.Trim(),
                         Logo = logo.Trim(),
+                        EpgId = epgId.Trim(),
                         Url = line,
                         RawInfo = string.Empty,
                         MediaKind = mediaKind

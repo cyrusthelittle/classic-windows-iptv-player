@@ -30,9 +30,16 @@ public partial class MainWindow : Window
     private readonly LoginResult _login;
     private readonly ConfigStore _store = new();
     private readonly PlaylistService _playlistService = new();
+    private readonly EpgService _epgService = new();
     private readonly StreamProbeService _streamProbeService = new();
     private readonly RemoteControlService _remoteControlService = new();
     private readonly StreamInfoTracker _streamInfoTracker = new();
+    private readonly LibVLCSharp.WinForms.VideoView _videoView = new()
+    {
+        BackColor = System.Drawing.Color.Black,
+        Dock = System.Windows.Forms.DockStyle.Fill,
+        TabStop = false
+    };
     private AppState _state;
     private readonly DispatcherTimer _searchTimer;
     private readonly DispatcherTimer _positionTimer;
@@ -43,6 +50,7 @@ public partial class MainWindow : Window
     private MediaPlayer? _mediaPlayer;
     private Media? _currentMedia;
     private MediaSearchIndex? _searchIndex;
+    private EpgGuide? _epgGuide;
     private List<Channel> _channels = [];
     private List<Channel> _filteredChannels = [];
     private List<Channel> _visibleChannels = [];
@@ -58,6 +66,9 @@ public partial class MainWindow : Window
     private bool _suppressBufferChange;
     private bool _isFullScreen;
     private bool _cursorHidden;
+    private bool _hasPointerScreenPosition;
+    private System.Drawing.Point _lastPointerScreenPosition;
+    private DateTime _ignoreFullscreenPointerActivityUntilUtc = DateTime.MinValue;
     private bool _channelsVisibleBeforeFullScreen = true;
     private bool _isShuttingDown;
     // XAML initializes the slider to 100 before the saved value is restored. Keep
@@ -66,6 +77,7 @@ public partial class MainWindow : Window
     private bool _suppressChannelSelectionChange;
     private bool _isChangingAccount;
     private DateTime? _livePauseStartedUtc;
+    private DateTime _lastEpgUiUpdateUtc = DateTime.MinValue;
     private TimeSpan _liveBehind = TimeSpan.Zero;
     private long? _pendingResumeTimeMs;
     private string _pendingResumeChannelId = string.Empty;
@@ -85,6 +97,7 @@ public partial class MainWindow : Window
     private double _heightBeforeFullScreen;
     private CancellationTokenSource? _filterCts;
     private CancellationTokenSource? _sourceProbeCts;
+    private CancellationTokenSource? _epgCts;
     // All stream startup, monitoring and recovery lives in the tuner; this
     // window only renders the states it reports and hosts the video surface.
     private ChannelTuner? _tuner;
@@ -101,7 +114,10 @@ public partial class MainWindow : Window
         _store.Save(_state);
 
         InitializeComponent();
+        InitializeVideoSurface();
         DarkModeMenuItem.IsChecked = _state.DarkMode;
+        EpgEnabledMenuItem.IsChecked = _state.EpgEnabled;
+        UpdateEpgEnabledUi();
         ApplyDefaultStartupFilters();
         InitializeButtonIcons();
         UpdateSearchScopeButtons();
@@ -117,6 +133,11 @@ public partial class MainWindow : Window
             UpdatePlaybackPosition();
             UpdateLiveDelayUi();
             UpdateStreamInfo();
+            if (_state.EpgEnabled && DateTime.UtcNow - _lastEpgUiUpdateUtc >= TimeSpan.FromSeconds(30))
+            {
+                _lastEpgUiUpdateUtc = DateTime.UtcNow;
+                UpdateEpgDisplay();
+            }
         };
 
         _controlsHideTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
@@ -130,6 +151,14 @@ public partial class MainWindow : Window
         };
 
         Loaded += MainWindow_Loaded;
+        Activated += (_, _) =>
+        {
+            if (_isFullScreen && !_isShuttingDown) ShowControls();
+        };
+        Deactivated += (_, _) =>
+        {
+            if (_cursorHidden) SetCursorHidden(false);
+        };
         Closing += (_, _) =>
         {
             SaveCurrentAudioState();
@@ -191,6 +220,7 @@ public partial class MainWindow : Window
             LibVLCSharp.Shared.Core.Initialize();
             return new LibVLC(
                 "--no-video-title-show",
+                "--embedded-video",
                 "--avcodec-hw=none",
                 "--network-caching=" + buffer,
                 "--live-caching=" + buffer,
@@ -214,6 +244,33 @@ public partial class MainWindow : Window
         RefreshSubtitleTracks();
     }
 
+    private void InitializeVideoSurface()
+    {
+        VideoViewHost.Child = _videoView;
+        _videoView.MouseDown += (_, e) => Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (e.Button != System.Windows.Forms.MouseButtons.Left) return;
+            if (e.Clicks >= 2) ToggleFullScreen();
+            else ShowControls();
+        }));
+        _videoView.MouseUp += (_, e) => Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (e.Button == System.Windows.Forms.MouseButtons.Right) ShowVideoContextMenu();
+        }));
+        _videoView.MouseMove += (_, _) => Dispatcher.BeginInvoke(new Action(HandlePointerMovement));
+        _videoView.MouseWheel += (_, e) => Dispatcher.BeginInvoke(new Action(() => ApplyVolumeWheel(e.Delta)));
+        _videoView.GotFocus += (_, _) => Dispatcher.BeginInvoke(new Action(() => Focus()));
+        _videoView.HandleCreated += (_, _) => AppLogger.Info("Video surface handle created. hwnd=0x" + _videoView.Handle.ToInt64().ToString("X"));
+        _videoView.HandleDestroyed += (_, _) =>
+        {
+            if (_isShuttingDown || _mediaPlayer is null) return;
+            AppLogger.Warn("Video surface handle was destroyed during playback; stopping to prevent a fallback output window.");
+            try { _mediaPlayer.Stop(); }
+            catch { }
+            _tuner?.Stop();
+        };
+    }
+
     // Called by the tuner on its worker thread, synchronously before Play, so the
     // player must be bound to the video surface before this returns.
     private void OnTunerPlayerAttached(MediaPlayer player, Media media, TuneRequest request)
@@ -227,21 +284,21 @@ public partial class MainWindow : Window
             _mediaPlayer = player;
             _currentMedia = media;
 
-            // The video view is collapsed while idle and its native host window is
-            // only created by a layout pass. Binding before that window exists
-            // leaves the player without a render target, and LibVLC would open the
-            // video in its own floating window. Force the layout now and verify
-            // the player really received a window handle before it starts playing.
+            // Materialize and assign the persistent child HWND before Play. If no
+            // drawable is present, LibVLC falls back to a top-level window titled
+            // "VLC Direct3D11 output" for streams such as Fokus TV.
             HideIdleBackground();
-            VideoView.UpdateLayout();
-            VideoView.MediaPlayer = player;
-            if (player.Hwnd == IntPtr.Zero)
+            VideoViewHost.UpdateLayout();
+            _videoView.CreateControl();
+            var videoHandle = _videoView.Handle;
+            _videoView.MediaPlayer = player;
+            if (videoHandle == IntPtr.Zero || player.Hwnd != videoHandle)
             {
-                VideoView.MediaPlayer = null;
-                VideoView.UpdateLayout();
-                VideoView.MediaPlayer = player;
-                AppLogger.Warn("Video surface was not ready on attach; rebound player. hwndSet=" + (player.Hwnd != IntPtr.Zero));
+                throw new InvalidOperationException("LibVLC did not accept the embedded video surface handle.");
             }
+            AppLogger.Info("Video surface attached. expectedHwnd=0x" + videoHandle.ToInt64().ToString("X") +
+                "; playerHwnd=0x" + player.Hwnd.ToInt64().ToString("X") +
+                "; handleCreated=" + _videoView.IsHandleCreated + "; channel=" + request.ChannelName);
 
             AttachUiEventHandlers(player);
             ApplySavedAudioState();
@@ -253,12 +310,13 @@ public partial class MainWindow : Window
     // detaching later would touch the disposed player's native handle and crash.
     private void OnTunerPlayerDetaching(MediaPlayer player)
     {
+        if (_isShuttingDown) return;
         try
         {
             Dispatcher.Invoke(() =>
             {
                 if (_isShuttingDown) return;
-                if (ReferenceEquals(VideoView.MediaPlayer, player)) VideoView.MediaPlayer = null;
+                if (ReferenceEquals(_videoView.MediaPlayer, player)) _videoView.MediaPlayer = null;
                 if (ReferenceEquals(_mediaPlayer, player))
                 {
                     _mediaPlayer = null;
@@ -394,6 +452,7 @@ public partial class MainWindow : Window
             await ApplyFiltersAsync();
             StatusText.Text = $"Loaded {_channels.Count:N0} items";
             AppLogger.Info("LoadChannelsAsync complete. channels=" + _channels.Count);
+            if (_state.EpgEnabled) _ = RefreshEpgAsync(showStatus: false);
         }
         finally
         {
@@ -405,7 +464,7 @@ public partial class MainWindow : Window
     {
         AccountLoadingMessage.Text = message;
         AccountLoadingOverlay.Visibility = Visibility.Visible;
-        VideoView.Visibility = Visibility.Collapsed;
+        VideoViewHost.Visibility = Visibility.Collapsed;
         Cursor = System.Windows.Input.Cursors.Wait;
     }
 
@@ -414,19 +473,19 @@ public partial class MainWindow : Window
         AccountLoadingMessage.Text = message;
     }
 
-    // A visible VideoView hosts a native LibVLC child window that paints over any
+    // A visible video host paints through a native child window over any
     // WPF content in the same area, so the idle background can only render
-    // correctly while VideoView is collapsed. Swap the two together.
+    // correctly while it is collapsed. Swap the two together.
     private void ShowIdleBackground()
     {
-        VideoView.Visibility = Visibility.Collapsed;
+        VideoViewHost.Visibility = Visibility.Collapsed;
         IdleBackground.Visibility = Visibility.Visible;
     }
 
     private void HideIdleBackground()
     {
         IdleBackground.Visibility = Visibility.Collapsed;
-        VideoView.Visibility = Visibility.Visible;
+        VideoViewHost.Visibility = Visibility.Visible;
     }
 
     private void HideAccountLoading()
@@ -711,7 +770,16 @@ public partial class MainWindow : Window
 
     private void SetMediaKindMode(int mediaKindMode)
     {
-        _mediaKindMode = Math.Clamp(mediaKindMode, 0, 3);
+        var nextMode = Math.Clamp(mediaKindMode, 0, 3);
+        if (_mediaKindMode != nextMode)
+        {
+            // A folder/letter belongs to the previous media library. Switching
+            // Live TV, Movies, or Series always starts at the new library root.
+            _activeFolder = null;
+            _activeLetter = null;
+        }
+
+        _mediaKindMode = nextMode;
         UpdateMediaKindButtons();
         ApplyFilters();
     }
@@ -764,6 +832,22 @@ public partial class MainWindow : Window
         if (_suppressChannelSelectionChange) return;
         if (ChannelList.SelectedItem is ChannelListEntry { Channel: { } channel }) BuildSourceList(channel);
         UpdateFavoriteButton();
+    }
+
+    private void ChannelLogo_TargetUpdated(object sender, System.Windows.Data.DataTransferEventArgs e)
+    {
+        if (sender is System.Windows.Controls.Image { Parent: Border host } image)
+        {
+            host.Visibility = image.Source is null ? Visibility.Collapsed : Visibility.Visible;
+        }
+    }
+
+    private void ChannelLogo_ImageFailed(object sender, ExceptionRoutedEventArgs e)
+    {
+        if (sender is System.Windows.Controls.Image { Parent: Border host })
+        {
+            host.Visibility = Visibility.Collapsed;
+        }
     }
 
     private void ChannelList_MouseDoubleClick(object sender, MouseButtonEventArgs e)
@@ -912,6 +996,8 @@ public partial class MainWindow : Window
             AppLogger.Info("Selected playback candidate. " + GetCandidateLogText(candidate, _currentCandidateIndex));
             _streamInfoTracker.ResetBandwidth();
             NowPlayingText.Text = channel.Name;
+            _lastEpgUiUpdateUtc = DateTime.UtcNow;
+            UpdateEpgDisplay();
             StatusText.Text = "Opening: " + channel.Name;
             HideIdleBackground();
             AddRecent(channel);
@@ -1511,8 +1597,11 @@ public partial class MainWindow : Window
     private void ToggleChannels_Click(object sender, RoutedEventArgs e)
     {
         _channelsVisible = !_channelsVisible;
-        SidebarColumn.Width = _channelsVisible ? new GridLength(360) : new GridLength(0);
+        SidebarColumn.MinWidth = _channelsVisible ? 320 : 0;
+        SidebarColumn.Width = _channelsVisible ? new GridLength(440) : new GridLength(0);
         Sidebar.Visibility = _channelsVisible ? Visibility.Visible : Visibility.Collapsed;
+        SplitterColumn.Width = _channelsVisible ? new GridLength(5) : new GridLength(0);
+        SidebarSplitter.Visibility = _channelsVisible ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void FullScreen_Click(object sender, RoutedEventArgs e) => ToggleFullScreen();
@@ -1556,6 +1645,7 @@ public partial class MainWindow : Window
         Topmost = true;
         CoverCurrentMonitor();
 
+        CapturePointerScreenPosition();
         ShowControls();
         _controlsHideTimer.Stop();
         _controlsHideTimer.Start();
@@ -1579,16 +1669,16 @@ public partial class MainWindow : Window
 
         AppMenu.Visibility = Visibility.Visible;
         MainStatusBar.Visibility = Visibility.Visible;
-        SidebarSplitter.Visibility = Visibility.Visible;
         TopMenuRow.Height = new GridLength(48);
         StatusRow.Height = new GridLength(28);
-        SplitterColumn.Width = new GridLength(5);
         RestoreControlsToPlayerGrid();
         ControlsRow.Height = GridLength.Auto;
-        SidebarColumn.MinWidth = 260;
         _channelsVisible = _channelsVisibleBeforeFullScreen;
+        SidebarColumn.MinWidth = _channelsVisible ? 320 : 0;
         Sidebar.Visibility = _channelsVisible ? Visibility.Visible : Visibility.Collapsed;
-        SidebarColumn.Width = _channelsVisible ? new GridLength(360) : new GridLength(0);
+        SidebarColumn.Width = _channelsVisible ? new GridLength(440) : new GridLength(0);
+        SplitterColumn.Width = _channelsVisible ? new GridLength(5) : new GridLength(0);
+        SidebarSplitter.Visibility = _channelsVisible ? Visibility.Visible : Visibility.Collapsed;
 
         ControlsBar.Visibility = Visibility.Visible;
         WindowState = _windowStateBeforeFullScreen;
@@ -1633,12 +1723,8 @@ public partial class MainWindow : Window
 
     private IntPtr VideoWheelWndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
-        // Covers the idle state (VideoView collapsed): the wheel message arrives at this
-        // window, so hit-test the cursor against VideoHost's bounds. During playback the
-        // overlay hosted inside VideoView receives the wheel instead (LibVLCSharp renders
-        // that overlay in its own floating window above the video), which is handled by
-        // VideoOverlay_MouseWheel — this hook then never sees the message, so the two
-        // paths cannot double-fire.
+        // Covers the idle surface and any wheel message routed to the WPF window.
+        // During playback the WinForms video child handles its own wheel event.
         if (msg == WM_MOUSEWHEEL)
         {
             var screenPoint = new Point(unchecked((short)(lParam.ToInt64() & 0xFFFF)), unchecked((short)((lParam.ToInt64() >> 16) & 0xFFFF)));
@@ -1654,24 +1740,45 @@ public partial class MainWindow : Window
         return IntPtr.Zero;
     }
 
-    private void VideoOverlay_MouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
-    {
-        // Raised via the transparent overlay Border inside VideoView, which LibVLCSharp
-        // hosts in a separate floating window above the native video surface — during
-        // playback the cursor is over that window, so wheel input lands here and never
-        // reaches MainWindow's message hook.
-        ApplyVolumeWheel(e.Delta);
-        e.Handled = true;
-    }
-
     private void ApplyVolumeWheel(int delta)
     {
         SetVolume(_state.VolumeLevel + (delta > 0 ? 5 : -5));
         ShowControls();
     }
 
-    private void Window_MouseMove(object sender, System.Windows.Input.MouseEventArgs e) => ShowControls();
-    private void ControlsBar_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e) => ShowControls();
+    private void Window_MouseMove(object sender, System.Windows.Input.MouseEventArgs e) => HandlePointerMovement();
+    private void ControlsBar_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e) => HandlePointerMovement();
+
+    private void HandlePointerMovement()
+    {
+        if (!_isFullScreen)
+        {
+            ShowControls();
+            return;
+        }
+
+        var current = System.Windows.Forms.Cursor.Position;
+        if (!_hasPointerScreenPosition)
+        {
+            _lastPointerScreenPosition = current;
+            _hasPointerScreenPosition = true;
+            return;
+        }
+
+        var deltaX = Math.Abs(current.X - _lastPointerScreenPosition.X);
+        var deltaY = Math.Abs(current.Y - _lastPointerScreenPosition.Y);
+        if (deltaX <= 2 && deltaY <= 2) return;
+
+        _lastPointerScreenPosition = current;
+        if (DateTime.UtcNow < _ignoreFullscreenPointerActivityUntilUtc) return;
+        ShowControls();
+    }
+
+    private void CapturePointerScreenPosition()
+    {
+        _lastPointerScreenPosition = System.Windows.Forms.Cursor.Position;
+        _hasPointerScreenPosition = true;
+    }
 
     private void ShowControls()
     {
@@ -1695,7 +1802,10 @@ public partial class MainWindow : Window
     {
         if (_isFullScreen)
         {
+            _controlsHideTimer.Stop();
             FullScreenControlsPopup.IsOpen = false;
+            CapturePointerScreenPosition();
+            _ignoreFullscreenPointerActivityUntilUtc = DateTime.UtcNow.AddMilliseconds(250);
             // Hide the cursor together with the OSD. The video area is covered by
             // WPF overlay surfaces (including LibVLC's floating overlay window),
             // so the app-wide override is the only reliable way to reach them all.
@@ -1707,7 +1817,18 @@ public partial class MainWindow : Window
     {
         if (_cursorHidden == hidden) return;
         _cursorHidden = hidden;
-        System.Windows.Input.Mouse.OverrideCursor = hidden ? System.Windows.Input.Cursors.None : null;
+        if (hidden)
+        {
+            System.Windows.Input.Mouse.OverrideCursor = System.Windows.Input.Cursors.None;
+            // WPF's override does not cross into the native WinForms/LibVLC
+            // child HWND. Hide the Win32 cursor for that surface as well.
+            System.Windows.Forms.Cursor.Hide();
+        }
+        else
+        {
+            System.Windows.Forms.Cursor.Show();
+            System.Windows.Input.Mouse.OverrideCursor = null;
+        }
     }
 
     private void AttachControlsToFullScreenPopup()
@@ -1736,6 +1857,31 @@ public partial class MainWindow : Window
         ThemeManager.Apply(_state.DarkMode);
         _store.Save(_state);
         StatusText.Text = _state.DarkMode ? "Dark mode enabled." : "Light mode enabled.";
+    }
+
+    private async void ToggleEpg_Click(object sender, RoutedEventArgs e)
+    {
+        _state.EpgEnabled = EpgEnabledMenuItem.IsChecked;
+        _store.Save(_state);
+        UpdateEpgEnabledUi();
+
+        if (!_state.EpgEnabled)
+        {
+            CancelEpgRefresh();
+            _epgGuide = null;
+            StatusText.Text = "Programme guide disabled.";
+            return;
+        }
+
+        StatusText.Text = "Programme guide enabled.";
+        if (_channels.Count > 0) await RefreshEpgAsync(showStatus: true);
+    }
+
+    private void UpdateEpgEnabledUi()
+    {
+        if (EpgPanel is null || RefreshEpgMenuItem is null) return;
+        EpgPanel.Visibility = _state.EpgEnabled ? Visibility.Visible : Visibility.Collapsed;
+        RefreshEpgMenuItem.IsEnabled = _state.EpgEnabled;
     }
 
     private void SetOsdOpacity_Click(object sender, RoutedEventArgs e)
@@ -1868,6 +2014,115 @@ public partial class MainWindow : Window
 
     private async void UpdatePlaylist_Click(object sender, RoutedEventArgs e) => await LoadChannelsAsync(true);
 
+    private async void RefreshEpg_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_state.EpgEnabled)
+        {
+            StatusText.Text = "Enable Programme guide (EPG) in Settings first.";
+            return;
+        }
+        await RefreshEpgAsync(showStatus: true);
+    }
+
+    private async Task RefreshEpgAsync(bool showStatus)
+    {
+        if (!_state.EpgEnabled || _isShuttingDown) return;
+        CancelEpgRefresh();
+        var cts = new CancellationTokenSource();
+        _epgCts = cts;
+        var accountId = _state.SelectedAccountId;
+        var account = _state.Account.Clone();
+
+        try
+        {
+            if (_epgService.BuildEpgUrl(account) is null)
+            {
+                _epgGuide = null;
+                UpdateEpgDisplay();
+                if (showStatus) StatusText.Text = "No EPG URL is configured for this account.";
+                return;
+            }
+
+            if (showStatus) StatusText.Text = "Refreshing programme guide...";
+            EpgNowText.Text = "Programme guide loading...";
+            EpgNextText.Text = "—";
+            var guide = await _epgService.LoadAsync(account, _channels, cts.Token);
+            if (cts.IsCancellationRequested || !_state.EpgEnabled || _isShuttingDown ||
+                !ReferenceEquals(_epgCts, cts) ||
+                !string.Equals(accountId, _state.SelectedAccountId, StringComparison.OrdinalIgnoreCase)) return;
+            _epgGuide = guide;
+            UpdateEpgDisplay();
+            if (showStatus) StatusText.Text = guide is null ? "No programme guide is available." : $"Programme guide updated: {guide.ProgrammeCount:N0} programmes";
+        }
+        catch (OperationCanceledException)
+        {
+            // Account changes and repeated refreshes cancel the older request.
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn("EPG update failed. " + ex.Message);
+            if (!ReferenceEquals(_epgCts, cts)) return;
+            _epgGuide = null;
+            EpgNowText.Text = "Programme guide unavailable";
+            EpgNextText.Text = "—";
+            if (showStatus) StatusText.Text = "EPG update failed: " + ex.Message;
+        }
+        finally
+        {
+            if (ReferenceEquals(_epgCts, cts)) _epgCts = null;
+            cts.Dispose();
+        }
+    }
+
+    private void CancelEpgRefresh()
+    {
+        var cts = _epgCts;
+        _epgCts = null;
+        try { cts?.Cancel(); }
+        catch (ObjectDisposedException) { }
+    }
+
+    private void UpdateEpgDisplay()
+    {
+        if (!_state.EpgEnabled || _isShuttingDown) return;
+        if (_currentChannel is null)
+        {
+            EpgNowText.Text = _epgGuide is null ? "No programme selected" : "Select a live channel";
+            EpgNextText.Text = "—";
+            EpgNowText.ToolTip = null;
+            EpgNextText.ToolTip = null;
+            return;
+        }
+
+        if (_currentChannel.MediaKind != MediaKind.Live)
+        {
+            EpgNowText.Text = "Programme guide is for live TV";
+            EpgNextText.Text = "—";
+            return;
+        }
+
+        var nowNext = _epgGuide?.GetNowNext(_currentChannel);
+        EpgNowText.Text = FormatProgramme(nowNext?.Now, "No current programme information");
+        EpgNextText.Text = FormatProgramme(nowNext?.Next, "No upcoming programme information");
+        EpgNowText.ToolTip = BuildProgrammeToolTip(nowNext?.Now);
+        EpgNextText.ToolTip = BuildProgrammeToolTip(nowNext?.Next);
+    }
+
+    private static string FormatProgramme(EpgProgramme? programme, string fallback)
+    {
+        if (programme is null) return fallback;
+        return $"{programme.Start.LocalDateTime:t}–{programme.Stop.LocalDateTime:t}  {programme.Title}";
+    }
+
+    private static string? BuildProgrammeToolTip(EpgProgramme? programme)
+    {
+        if (programme is null) return null;
+        var detail = FormatProgramme(programme, string.Empty);
+        if (!string.IsNullOrWhiteSpace(programme.Category)) detail += Environment.NewLine + programme.Category;
+        if (!string.IsNullOrWhiteSpace(programme.Description)) detail += Environment.NewLine + Environment.NewLine + programme.Description;
+        return detail;
+    }
+
     private void ClearCache_Click(object sender, RoutedEventArgs e)
     {
         _store.ClearChannelCache(_state.SelectedAccountId);
@@ -1964,6 +2219,8 @@ public partial class MainWindow : Window
         _sourceProbeCts?.Cancel();
         _sourceProbeCts?.Dispose();
         _sourceProbeCts = null;
+        CancelEpgRefresh();
+        _epgGuide = null;
 
         var previousMedia = _currentMedia;
         _currentMedia = null;
@@ -1984,6 +2241,7 @@ public partial class MainWindow : Window
         FolderBackButton.Visibility = Visibility.Collapsed;
         CountText.Text = "0 items";
         NowPlayingText.Text = "Select a channel to play";
+        UpdateEpgDisplay();
         PlayPauseButton.Content = IconFactory.Create(IconFactory.Play);
         UpdateFavoriteButton();
         RefreshSubtitleTracks();
@@ -2304,6 +2562,7 @@ public partial class MainWindow : Window
     {
         public string Name { get; private init; } = string.Empty;
         public string Group { get; private init; } = string.Empty;
+        public string Logo { get; private init; } = string.Empty;
         public Viewbox Icon { get; private init; } = IconFactory.Create(IconFactory.Tv, 18);
         public bool IsFolder { get; private init; }
         public string FolderName { get; private init; } = string.Empty;
@@ -2327,10 +2586,19 @@ public partial class MainWindow : Window
             {
                 Name = channel.Name,
                 Group = channel.Group,
+                Logo = NormalizeLogoUrl(channel.Logo),
                 Icon = IconFactory.Create(channel.MediaKind == MediaKind.Live ? IconFactory.Tv : IconFactory.Cinema, 18),
                 FolderName = NormalizeGroupName(channel.Group),
                 Channel = channel
             };
+        }
+
+        private static string NormalizeLogoUrl(string logo)
+        {
+            if (!Uri.TryCreate(logo?.Trim(), UriKind.Absolute, out var uri)) return string.Empty;
+            return uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps
+                ? uri.AbsoluteUri
+                : string.Empty;
         }
     }
 
@@ -2343,7 +2611,11 @@ public partial class MainWindow : Window
         try
         {
             PrepareWindowForShutdown();
+            try { _mediaPlayer?.Stop(); }
+            catch { }
+            _videoView.MediaPlayer = null;
             _sourceProbeCts?.Cancel();
+            CancelEpgRefresh();
             _sourceProbeCts?.Dispose();
             _sourceProbeCts = null;
             _positionTimer.Stop();
@@ -2366,6 +2638,8 @@ public partial class MainWindow : Window
     private void PrepareWindowForShutdown()
     {
         _isShuttingDown = true;
+        try { SetCursorHidden(false); }
+        catch { }
 
         try
         {

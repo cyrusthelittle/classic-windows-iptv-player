@@ -1,6 +1,7 @@
 using CyrusIptv.Core;
 using LibVLCSharp.Shared;
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -56,6 +57,9 @@ public sealed class ChannelTuner : IDisposable
     private int _generation;
     private MediaPlayer? _activePlayer;
     private Media? _activeMedia;
+    private CancellationTokenSource? _activeTuneCts;
+    private Task? _activeTuneTask;
+    private readonly List<Task> _tuneCycles = [];
     private Task _retireChain = Task.CompletedTask;
     private volatile bool _disposed;
     private volatile bool _userPaused;
@@ -108,27 +112,63 @@ public sealed class ChannelTuner : IDisposable
 
     public void Play(TuneRequest request)
     {
+        if (_disposed) return;
         var generation = Interlocked.Increment(ref _generation);
+        var cts = new CancellationTokenSource();
+        CancellationTokenSource? previousCts;
+        Task? previousCycle;
+        lock (_gate)
+        {
+            previousCts = _activeTuneCts;
+            previousCycle = _activeTuneTask;
+            _activeTuneCts = cts;
+            _tuneCycles.RemoveAll(task => task.IsCompleted);
+        }
+        try { previousCts?.Cancel(); }
+        catch (ObjectDisposedException) { }
         AppLogger.Info("Tuner: play requested. generation=" + generation + "; channel=" + request.ChannelName + "; url=" + AppLogger.SanitizeUrl(request.Url));
-        _ = Task.Run(async () =>
+        var cycle = Task.Run(async () =>
         {
             try
             {
-                await RunTuneCycleAsync(generation, request).ConfigureAwait(false);
+                if (previousCycle is not null)
+                {
+                    try { await previousCycle.ConfigureAwait(false); }
+                    catch { }
+                }
+                if (cts.IsCancellationRequested || !IsCurrent(generation)) return;
+                await RunTuneCycleAsync(generation, request, cts.Token).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
                 AppLogger.Error("Tuner: tune cycle crashed. generation=" + generation, ex);
                 RaiseState(new TunerStateSnapshot(TunerStatus.Failed, request, 0, MaxAttempts, ex.Message));
             }
+            finally
+            {
+                lock (_gate)
+                {
+                    if (ReferenceEquals(_activeTuneCts, cts))
+                    {
+                        _activeTuneCts = null;
+                        _activeTuneTask = null;
+                    }
+                }
+                cts.Dispose();
+            }
         });
+        lock (_gate)
+        {
+            _tuneCycles.Add(cycle);
+            if (ReferenceEquals(_activeTuneCts, cts)) _activeTuneTask = cycle;
+        }
     }
 
     public void Stop()
     {
         var generation = Interlocked.Increment(ref _generation);
         AppLogger.Info("Tuner: stop requested. generation=" + generation);
-        RetireActivePlayer();
+        CancelAndDetachActivePlayer();
         RaiseState(new TunerStateSnapshot(TunerStatus.Idle, null, 0, MaxAttempts, null));
     }
 
@@ -146,9 +186,12 @@ public sealed class ChannelTuner : IDisposable
         if (_disposed) return;
         _disposed = true;
         Interlocked.Increment(ref _generation);
-        RetireActivePlayer();
+        CancelAndDetachActivePlayer();
         try
         {
+            Task[] cycles;
+            lock (_gate) cycles = [.. _tuneCycles];
+            Task.WaitAll(cycles, TimeSpan.FromSeconds(3));
             // Give background teardown a moment to finish; disposing LibVLC while
             // a player is still alive can crash the native engine.
             _retireChain.Wait(TimeSpan.FromSeconds(3));
@@ -164,14 +207,14 @@ public sealed class ChannelTuner : IDisposable
         return !_disposed && generation == Volatile.Read(ref _generation);
     }
 
-    private async Task RunTuneCycleAsync(int generation, TuneRequest request)
+    private async Task RunTuneCycleAsync(int generation, TuneRequest request, CancellationToken cancellationToken)
     {
         var maxAttempts = MaxAttempts;
         var attempt = 0;
         while (attempt < maxAttempts)
         {
             attempt++;
-            if (!IsCurrent(generation)) return;
+            if (!IsCurrent(generation) || cancellationToken.IsCancellationRequested) return;
 
             RaiseState(new TunerStateSnapshot(TunerStatus.Tuning, request, attempt, maxAttempts, null));
             AppLogger.Info("Tuner: attempt " + attempt + "/" + maxAttempts + ". generation=" + generation + "; channel=" + request.ChannelName);
@@ -217,12 +260,15 @@ public sealed class ChannelTuner : IDisposable
                 _activeMedia = media;
             }
 
-            // Surface handoff protocol: the host releases the old player's binding
-            // while that player is still alive (rebinding/detaching touches its
-            // native handle), then binds the new player, and only then is the old
-            // player torn down. A detached player can never be rebound, because
-            // hosts only ever bind the tuner's current player.
-            if (oldPlayer is not null) RaiseDetaching(oldPlayer);
+            // Surface handoff protocol: release the old player's binding while it
+            // is alive, then bind the new player. Its owning cycle will tear the
+            // old player down only after native callback cleanup has completed.
+            if (oldPlayer is not null)
+            {
+                StopPlayer(oldPlayer);
+                RaiseDetaching(oldPlayer);
+                Retire(oldPlayer, oldMedia);
+            }
 
             try
             {
@@ -231,14 +277,20 @@ public sealed class ChannelTuner : IDisposable
             catch (Exception ex)
             {
                 AppLogger.Error("Tuner: PlayerAttached handler failed.", ex);
+                ReleaseAttempt(player, media);
+                RaiseState(new TunerStateSnapshot(TunerStatus.Failed, request, attempt, maxAttempts, "The embedded video surface is unavailable."));
+                return;
             }
 
-            Retire(oldPlayer, oldMedia);
-
-            var opened = await OpenAsync(player, media).ConfigureAwait(false);
-            // If a newer request took over while this one was opening, the
-            // successor has already retired this player; just bow out.
-            if (!IsCurrent(generation)) return;
+            // The previous cycle owns and retires its own player after its native
+            // callbacks have been detached. Cancelling it is safe; disposing it
+            // here would race OpenAsync/MonitorAsync event cleanup.
+            var opened = await OpenAsync(player, media, cancellationToken).ConfigureAwait(false);
+            if (!IsCurrent(generation) || cancellationToken.IsCancellationRequested)
+            {
+                ReleaseAttempt(player, media);
+                return;
+            }
 
             if (opened)
             {
@@ -246,19 +298,24 @@ public sealed class ChannelTuner : IDisposable
                 AppLogger.Info("Tuner: playing. generation=" + generation + "; attempt=" + attempt + "; channel=" + request.ChannelName);
 
                 var playingSince = DateTime.UtcNow;
-                var end = await MonitorAsync(player).ConfigureAwait(false);
-                if (!IsCurrent(generation)) return;
+                var end = await MonitorAsync(player, cancellationToken).ConfigureAwait(false);
+                if (!IsCurrent(generation) || cancellationToken.IsCancellationRequested)
+                {
+                    ReleaseAttempt(player, media);
+                    return;
+                }
 
                 if (end == StreamEnd.EndedNormally && !request.IsLive)
                 {
                     AppLogger.Info("Tuner: media finished. generation=" + generation + "; channel=" + request.ChannelName);
                     RaiseState(new TunerStateSnapshot(TunerStatus.Ended, request, attempt, maxAttempts, null));
+                    ReleaseAttempt(player, media);
                     return;
                 }
 
                 if (end == StreamEnd.StoppedExternally)
                 {
-                    // The host stopped the player deliberately (user stop/shutdown).
+                    ReleaseAttempt(player, media);
                     return;
                 }
 
@@ -277,24 +334,19 @@ public sealed class ChannelTuner : IDisposable
                 AppLogger.Warn("Tuner: attempt " + attempt + " did not reach Playing. generation=" + generation + "; channel=" + request.ChannelName);
             }
 
-            // This attempt's player is dead weight; make the host release the
-            // video surface first, then retire it before the next try.
-            lock (_gate)
-            {
-                if (ReferenceEquals(_activePlayer, player))
-                {
-                    _activePlayer = null;
-                    _activeMedia = null;
-                }
-            }
-
-            RaiseDetaching(player);
-            Retire(player, media);
+            ReleaseAttempt(player, media);
 
             if (attempt < maxAttempts)
             {
                 var delay = RetryDelaysMs[Math.Min(attempt, RetryDelaysMs.Length) - 1];
-                await Task.Delay(delay).ConfigureAwait(false);
+                try
+                {
+                    await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
             }
         }
 
@@ -307,7 +359,7 @@ public sealed class ChannelTuner : IDisposable
     /// Starts playback and waits until the stream is confirmed playing, fails,
     /// or the open watchdog expires. Never throws.
     /// </summary>
-    private static async Task<bool> OpenAsync(MediaPlayer player, Media media)
+    private static async Task<bool> OpenAsync(MediaPlayer player, Media media, CancellationToken cancellationToken)
     {
         var outcome = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         void OnPlaying(object? s, EventArgs e) => outcome.TrySetResult(true);
@@ -317,6 +369,7 @@ public sealed class ChannelTuner : IDisposable
         player.EncounteredError += OnFailure;
         player.Stopped += OnFailure;
         player.EndReached += OnFailure;
+        using var cancellationRegistration = cancellationToken.Register(() => outcome.TrySetResult(false));
         try
         {
             if (!player.Play(media))
@@ -360,7 +413,7 @@ public sealed class ChannelTuner : IDisposable
     /// a player always calls Stop first, so this completes for superseded
     /// players too and never leaks.
     /// </summary>
-    private static async Task<StreamEnd> MonitorAsync(MediaPlayer player)
+    private static async Task<StreamEnd> MonitorAsync(MediaPlayer player, CancellationToken cancellationToken)
     {
         var outcome = new TaskCompletionSource<StreamEnd>(TaskCreationOptions.RunContinuationsAsynchronously);
         void OnError(object? s, EventArgs e) => outcome.TrySetResult(StreamEnd.Error);
@@ -370,6 +423,7 @@ public sealed class ChannelTuner : IDisposable
         player.EncounteredError += OnError;
         player.EndReached += OnEnd;
         player.Stopped += OnStopped;
+        using var cancellationRegistration = cancellationToken.Register(() => outcome.TrySetResult(StreamEnd.StoppedExternally));
         try
         {
             return await outcome.Task.ConfigureAwait(false);
@@ -382,20 +436,44 @@ public sealed class ChannelTuner : IDisposable
         }
     }
 
-    private void RetireActivePlayer()
+    private void CancelAndDetachActivePlayer()
     {
-        MediaPlayer? player;
-        Media? media;
+        CancellationTokenSource? cts;
         lock (_gate)
         {
-            player = _activePlayer;
-            media = _activeMedia;
-            _activePlayer = null;
-            _activeMedia = null;
+            cts = _activeTuneCts;
         }
 
-        if (player is not null) RaiseDetaching(player);
+        try { cts?.Cancel(); }
+        catch (ObjectDisposedException) { }
+    }
+
+    private void ReleaseAttempt(MediaPlayer player, Media media)
+    {
+        // Callback subscriptions have already been removed when this is called.
+        // Stop while the drawable is still attached; clearing a live player's
+        // HWND lets LibVLC fall back to a top-level Direct3D11 output window.
+        StopPlayer(player);
+
+        var wasActive = false;
+        lock (_gate)
+        {
+            if (ReferenceEquals(_activePlayer, player))
+            {
+                _activePlayer = null;
+                _activeMedia = null;
+                wasActive = true;
+            }
+        }
+
+        if (wasActive) RaiseDetaching(player);
         Retire(player, media);
+    }
+
+    private static void StopPlayer(MediaPlayer player)
+    {
+        try { player.Stop(); }
+        catch (Exception ex) { AppLogger.Warn("Tuner: player Stop failed. " + ex.Message); }
     }
 
     private void RaiseDetaching(MediaPlayer player)
@@ -426,15 +504,6 @@ public sealed class ChannelTuner : IDisposable
                 catch
                 {
                     // A failed earlier retirement must not leak this player too.
-                }
-
-                try
-                {
-                    player?.Stop();
-                }
-                catch (Exception ex)
-                {
-                    AppLogger.Warn("Tuner: retired player Stop failed. " + ex.Message);
                 }
 
                 try
