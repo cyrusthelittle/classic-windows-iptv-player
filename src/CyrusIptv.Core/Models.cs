@@ -247,3 +247,25 @@ public enum ChannelViewMode
     Favorites,
     Recent
 }
+
+// A Series-kind Channel is either a placeholder standing in for the whole show
+// (Url = "series:{seriesId}", not directly playable) or a real episode once
+// PlaylistService.FetchSeriesEpisodesAsync has resolved it to a playable stream URL.
+public static class SeriesPlaceholder
+{
+    private const string Scheme = "series:";
+
+    public static string BuildUrl(string seriesId) => Scheme + seriesId;
+
+    public static bool TryGetSeriesId(Channel channel, out string seriesId)
+    {
+        seriesId = string.Empty;
+        if (channel.MediaKind != MediaKind.Series) return false;
+
+        var url = channel.Url ?? string.Empty;
+        if (!url.StartsWith(Scheme, StringComparison.OrdinalIgnoreCase)) return false;
+
+        seriesId = url[Scheme.Length..];
+        return !string.IsNullOrWhiteSpace(seriesId);
+    }
+}

@@ -37,22 +37,326 @@ public sealed class PlaylistService
     {
         var playlistUrl = BuildPlaylistUrl(account);
         AppLogger.Info("Loading playlist from " + AppLogger.SanitizeUrl(playlistUrl));
-        var mediaKindByStreamId = await FetchXtreamMediaKindMapAsync(account, cancellationToken);
-        AppLogger.Info("Xtream media kind map loaded. count=" + mediaKindByStreamId.Count);
-        using var response = await _httpClient.GetAsync(playlistUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        AppLogger.Info("Playlist HTTP response. status=" + (int)response.StatusCode + " " + response.ReasonPhrase);
+
+        Exception m3uFailure;
+        try
+        {
+            using var response = await _httpClient.GetAsync(playlistUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            AppLogger.Info("Playlist HTTP response. status=" + (int)response.StatusCode + " " + response.ReasonPhrase);
+            response.EnsureSuccessStatusCode();
+
+            var mediaKindByStreamId = await FetchXtreamMediaKindMapAsync(account, cancellationToken);
+            AppLogger.Info("Xtream media kind map loaded. count=" + mediaKindByStreamId.Count);
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            var channels = await ParseM3uFromStreamAsync(stream, mediaKindByStreamId, cancellationToken);
+            AppLogger.Info("Playlist parsed. channels=" + channels.Count);
+            if (channels.Count > 0) return await ReplaceSeriesWithApiPlaceholdersAsync(channels, account, cancellationToken);
+
+            m3uFailure = new InvalidOperationException("Playlist was downloaded but no playable channels were found.");
+        }
+        catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException)
+        {
+            m3uFailure = ex;
+        }
+
+        // Some large/reseller Xtream panels block or break the get.php M3U export
+        // (e.g. returning a non-standard status code with an empty body) while the
+        // player_api.php JSON actions keep working. Fall back to building the channel
+        // list straight from the API instead of failing outright.
+        AppLogger.Warn("M3U playlist unavailable, falling back to the Xtream API directly. " + m3uFailure.Message);
+
+        if (string.IsNullOrWhiteSpace(account.M3uUrl) &&
+            !string.IsNullOrWhiteSpace(account.Username) &&
+            !string.IsNullOrWhiteSpace(account.Password))
+        {
+            var apiChannels = await BuildChannelsFromXtreamApiAsync(account, cancellationToken);
+            if (apiChannels.Count > 0)
+            {
+                AppLogger.Info("Xtream API fallback succeeded. channels=" + apiChannels.Count);
+                return apiChannels;
+            }
+        }
+
+        throw new InvalidOperationException(
+            "Playlist was downloaded but no playable channels were found. The server may have returned a non-M3U response, expired account message, or an empty playlist.",
+            m3uFailure);
+    }
+
+    // The M3U/get.php export has no concept of "a series" -- providers flatten every
+    // episode into its own row (e.g. "Show Name S01E01"), so browsing by series only
+    // works if those rows are swapped for the same API-backed placeholders the
+    // Xtream-API fallback uses (see AddXtreamSeriesPlaceholdersAsync). This runs
+    // whenever the account has Xtream credentials, regardless of whether get.php
+    // itself succeeded, so series browsing behaves the same on every account.
+    private async Task<List<Channel>> ReplaceSeriesWithApiPlaceholdersAsync(List<Channel> channels, AccountSettings account, CancellationToken cancellationToken)
+    {
+        if (!string.IsNullOrWhiteSpace(account.M3uUrl) ||
+            string.IsNullOrWhiteSpace(account.Username) ||
+            string.IsNullOrWhiteSpace(account.Password))
+        {
+            return channels;
+        }
+
+        try
+        {
+            var apiUrl = BuildPlayerApiUrl(account);
+            var seriesCategories = await FetchXtreamCategoriesAsync(apiUrl, "get_series_categories", cancellationToken);
+
+            var withoutSeries = channels.Where(c => c.MediaKind != MediaKind.Series).ToList();
+            var seenIds = new HashSet<string>(withoutSeries.Select(c => c.Id), StringComparer.OrdinalIgnoreCase);
+            var before = withoutSeries.Count;
+
+            await AddXtreamSeriesPlaceholdersAsync(apiUrl, seriesCategories, withoutSeries, seenIds, cancellationToken);
+            AppLogger.Info("Replaced M3U series rows with API-backed series placeholders. placeholders=" + (withoutSeries.Count - before));
+            return withoutSeries;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn("Could not replace M3U series rows with API placeholders; keeping them as individual episodes. " + ex.Message);
+            return channels;
+        }
+    }
+
+    private async Task<List<Channel>> BuildChannelsFromXtreamApiAsync(AccountSettings account, CancellationToken cancellationToken)
+    {
+        var apiUrl = BuildPlayerApiUrl(account);
+        var streamBaseUrl = BuildStreamBaseUrl(account);
+
+        var liveCategories = await FetchXtreamCategoriesAsync(apiUrl, "get_live_categories", cancellationToken);
+        var vodCategories = await FetchXtreamCategoriesAsync(apiUrl, "get_vod_categories", cancellationToken);
+        var seriesCategories = await FetchXtreamCategoriesAsync(apiUrl, "get_series_categories", cancellationToken);
+
+        var channels = new List<Channel>();
+        var seenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        await AddXtreamChannelsAsync(apiUrl, streamBaseUrl, account, "get_live_streams", "live", MediaKind.Live, liveCategories, channels, seenIds, cancellationToken);
+        await AddXtreamChannelsAsync(apiUrl, streamBaseUrl, account, "get_vod_streams", "movie", MediaKind.Movie, vodCategories, channels, seenIds, cancellationToken);
+        await AddXtreamSeriesPlaceholdersAsync(apiUrl, seriesCategories, channels, seenIds, cancellationToken);
+
+        AppLogger.Info("Xtream API fallback built " + channels.Count +
+            " channels (live + VOD + series). Series episodes are fetched on demand when a series is opened, since listing them all up front would require one API call per series.");
+        return channels;
+    }
+
+    // Series-kind channels here are placeholders (Url = "series:{seriesId}"): listing
+    // every episode for every series up front would mean one API call per series,
+    // which for a large catalog is impractically slow and risks the provider
+    // throttling the account. FetchSeriesEpisodesAsync resolves one series at a time,
+    // called only when the user opens it.
+    private async Task AddXtreamSeriesPlaceholdersAsync(
+        string apiUrl,
+        IReadOnlyDictionary<string, string> categoryNames,
+        List<Channel> channels,
+        HashSet<string> seenIds,
+        CancellationToken cancellationToken)
+    {
+        var url = AddOrReplaceQuery(apiUrl, new Dictionary<string, string> { ["action"] = "get_series" });
+        using var response = await _httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        AppLogger.Info($"Xtream fallback response. action=get_series; status={(int)response.StatusCode} {response.ReasonPhrase}");
+        if (!response.IsSuccessStatusCode) return;
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+        if (document.RootElement.ValueKind != JsonValueKind.Array) return;
+
+        var before = channels.Count;
+        foreach (var item in document.RootElement.EnumerateArray())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!TryGetJsonText(item, "series_id", out var seriesId) || string.IsNullOrWhiteSpace(seriesId)) continue;
+
+            var name = TryGetJsonText(item, "name", out var seriesName) && !string.IsNullOrWhiteSpace(seriesName) ? seriesName : "Unnamed Series";
+            var group = TryGetJsonText(item, "category_id", out var categoryId) && categoryNames.TryGetValue(categoryId, out var categoryName)
+                ? categoryName
+                : "Uncategorized";
+            var logo = TryGetJsonText(item, "cover", out var cover) ? cover : string.Empty;
+
+            var placeholderUrl = SeriesPlaceholder.BuildUrl(seriesId);
+            var id = CreateStableId(MediaKind.Series + "|" + name + "|" + placeholderUrl);
+            if (!seenIds.Add(id)) continue;
+
+            channels.Add(new Channel
+            {
+                Id = id,
+                Name = name.Trim(),
+                Group = group.Trim(),
+                Logo = logo.Trim(),
+                EpgId = string.Empty,
+                Url = placeholderUrl,
+                RawInfo = string.Empty,
+                MediaKind = MediaKind.Series
+            });
+        }
+
+        AppLogger.Info($"Xtream fallback parsed. action=get_series; added={channels.Count - before}");
+    }
+
+    // Called on demand (when the user opens a specific series) rather than eagerly
+    // for every series, since each call only covers one series's episodes.
+    public async Task<IReadOnlyList<Channel>> FetchSeriesEpisodesAsync(AccountSettings account, string seriesId, CancellationToken cancellationToken)
+    {
+        var apiUrl = BuildPlayerApiUrl(account);
+        var streamBaseUrl = BuildStreamBaseUrl(account);
+        var url = AddOrReplaceQuery(apiUrl, new Dictionary<string, string>
+        {
+            ["action"] = "get_series_info",
+            ["series_id"] = seriesId
+        });
+
+        AppLogger.Info("Fetching series episodes. seriesId=" + seriesId);
+        using var response = await _httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        AppLogger.Info($"Series info response. seriesId={seriesId}; status={(int)response.StatusCode} {response.ReasonPhrase}");
         response.EnsureSuccessStatusCode();
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        var channels = await ParseM3uFromStreamAsync(stream, mediaKindByStreamId, cancellationToken);
-        AppLogger.Info("Playlist parsed. channels=" + channels.Count);
-        if (channels.Count == 0)
+        using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+
+        var episodes = new List<Channel>();
+        if (!document.RootElement.TryGetProperty("episodes", out var episodesElement) || episodesElement.ValueKind != JsonValueKind.Object)
         {
-            AppLogger.Warn("Playlist parsed but no playable channels were found.");
-            throw new InvalidOperationException("Playlist was downloaded but no playable channels were found. The server may have returned a non-M3U response, expired account message, or an empty playlist.");
+            return episodes;
         }
 
-        return channels;
+        var username = Uri.EscapeDataString(account.Username.Trim());
+        var password = Uri.EscapeDataString(account.Password.Trim());
+
+        foreach (var season in episodesElement.EnumerateObject())
+        {
+            if (season.Value.ValueKind != JsonValueKind.Array) continue;
+
+            foreach (var episode in season.Value.EnumerateArray())
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!TryGetJsonText(episode, "id", out var episodeId) || string.IsNullOrWhiteSpace(episodeId)) continue;
+
+                var title = TryGetJsonText(episode, "title", out var episodeTitle) && !string.IsNullOrWhiteSpace(episodeTitle)
+                    ? episodeTitle
+                    : "Episode";
+                var extension = TryGetJsonText(episode, "container_extension", out var ext) && !string.IsNullOrWhiteSpace(ext) ? ext : "mp4";
+
+                var episodeUrl = $"{streamBaseUrl}/series/{username}/{password}/{episodeId}.{extension}";
+                var id = CreateStableId(MediaKind.Series + "|" + title + "|" + episodeUrl);
+
+                episodes.Add(new Channel
+                {
+                    Id = id,
+                    Name = title.Trim(),
+                    Group = "Season " + season.Name,
+                    Logo = string.Empty,
+                    EpgId = string.Empty,
+                    Url = episodeUrl,
+                    RawInfo = string.Empty,
+                    MediaKind = MediaKind.Series
+                });
+            }
+        }
+
+        AppLogger.Info("Series episodes parsed. seriesId=" + seriesId + "; episodes=" + episodes.Count);
+        return episodes;
+    }
+
+    private async Task<Dictionary<string, string>> FetchXtreamCategoriesAsync(string apiUrl, string action, CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var url = AddOrReplaceQuery(apiUrl, new Dictionary<string, string> { ["action"] = action });
+            using var response = await _httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            if (!response.IsSuccessStatusCode) return result;
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            if (document.RootElement.ValueKind != JsonValueKind.Array) return result;
+
+            foreach (var item in document.RootElement.EnumerateArray())
+            {
+                if (!TryGetJsonText(item, "category_id", out var id) || string.IsNullOrWhiteSpace(id)) continue;
+                if (TryGetJsonText(item, "category_name", out var name) && !string.IsNullOrWhiteSpace(name))
+                {
+                    result[id] = name;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"Fetching {action} failed. Falling back to uncategorized. {ex.Message}");
+        }
+
+        return result;
+    }
+
+    private async Task AddXtreamChannelsAsync(
+        string apiUrl,
+        string streamBaseUrl,
+        AccountSettings account,
+        string action,
+        string urlSegment,
+        MediaKind mediaKind,
+        IReadOnlyDictionary<string, string> categoryNames,
+        List<Channel> channels,
+        HashSet<string> seenIds,
+        CancellationToken cancellationToken)
+    {
+        var url = AddOrReplaceQuery(apiUrl, new Dictionary<string, string> { ["action"] = action });
+        using var response = await _httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        AppLogger.Info($"Xtream fallback response. action={action}; status={(int)response.StatusCode} {response.ReasonPhrase}");
+        if (!response.IsSuccessStatusCode) return;
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+        if (document.RootElement.ValueKind != JsonValueKind.Array) return;
+
+        var username = Uri.EscapeDataString(account.Username.Trim());
+        var password = Uri.EscapeDataString(account.Password.Trim());
+        var before = channels.Count;
+
+        foreach (var item in document.RootElement.EnumerateArray())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!TryGetJsonText(item, "stream_id", out var streamId) || string.IsNullOrWhiteSpace(streamId)) continue;
+
+            var name = TryGetJsonText(item, "name", out var streamName) && !string.IsNullOrWhiteSpace(streamName) ? streamName : "Unnamed Channel";
+            var group = TryGetJsonText(item, "category_id", out var categoryId) && categoryNames.TryGetValue(categoryId, out var categoryName)
+                ? categoryName
+                : "Uncategorized";
+            var logo = TryGetJsonText(item, "stream_icon", out var icon) ? icon : string.Empty;
+            var epgId = TryGetJsonText(item, "epg_channel_id", out var epg) ? epg : string.Empty;
+            var extension = mediaKind == MediaKind.Movie && TryGetJsonText(item, "container_extension", out var ext) && !string.IsNullOrWhiteSpace(ext)
+                ? ext
+                : "ts";
+
+            var streamUrl = $"{streamBaseUrl}/{urlSegment}/{username}/{password}/{streamId}.{extension}";
+            var id = CreateStableId(mediaKind + "|" + name + "|" + streamUrl);
+            if (!seenIds.Add(id)) continue;
+
+            channels.Add(new Channel
+            {
+                Id = id,
+                Name = name.Trim(),
+                Group = group.Trim(),
+                Logo = logo.Trim(),
+                EpgId = epgId.Trim(),
+                Url = streamUrl,
+                RawInfo = string.Empty,
+                MediaKind = mediaKind
+            });
+        }
+
+        AppLogger.Info($"Xtream fallback parsed. action={action}; added={channels.Count - before}");
+    }
+
+    private static string BuildStreamBaseUrl(AccountSettings account)
+    {
+        var serverUrl = (account.ServerUrl ?? string.Empty).Trim();
+        if (!serverUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+            !serverUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            serverUrl = "http://" + serverUrl;
+        }
+
+        var uri = new Uri(serverUrl, UriKind.Absolute);
+        return new UriBuilder(uri.Scheme, uri.Host, uri.Port) { Path = string.Empty }.Uri.ToString().TrimEnd('/');
     }
 
 

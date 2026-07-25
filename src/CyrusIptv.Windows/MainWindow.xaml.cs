@@ -61,6 +61,12 @@ public partial class MainWindow : Window
     private PauseResumeSnapshot? _pausedPlayback;
     private string? _activeFolder;
     private string? _activeLetter;
+    // Set while browsing a series' episode list (drilled into via a series
+    // placeholder). Takes over the channel list display; FolderBack_Click pops it
+    // first, before folder/letter scope, so "back" always goes one level at a time.
+    private string? _activeSeriesId;
+    private string? _activeSeriesName;
+    private List<Channel>? _activeSeriesEpisodes;
     private bool _isSeeking;
     private bool _channelsVisible = true;
     private bool _suppressBufferChange;
@@ -173,6 +179,9 @@ public partial class MainWindow : Window
         _viewMode = 0;
         _activeFolder = null;
         _activeLetter = null;
+        _activeSeriesId = null;
+        _activeSeriesName = null;
+        _activeSeriesEpisodes = null;
     }
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
@@ -525,6 +534,7 @@ public partial class MainWindow : Window
         var channels = _channels;
         var favorites = viewMode == 1 ? _state.FavoriteIds.ToHashSet(StringComparer.OrdinalIgnoreCase) : null;
         var recentUrls = viewMode == 2 ? _state.Recent.Take(20).Select(r => r.Url).ToHashSet(StringComparer.OrdinalIgnoreCase) : null;
+        var seriesEpisodes = _activeSeriesEpisodes;
 
         _filterCts?.Cancel();
         var cts = new CancellationTokenSource();
@@ -533,7 +543,9 @@ public partial class MainWindow : Window
         try
         {
             var result = await Task.Run(
-                () => BuildFilterResult(channels, search, kind, activeFolder, activeLetter, browseMode, favorites, recentUrls, cts.Token),
+                () => seriesEpisodes is not null
+                    ? BuildSeriesFilterResult(seriesEpisodes, search, cts.Token)
+                    : BuildFilterResult(channels, search, kind, activeFolder, activeLetter, browseMode, favorites, recentUrls, cts.Token),
                 cts.Token);
 
             if (!ReferenceEquals(_filterCts, cts) || cts.IsCancellationRequested) return;
@@ -551,8 +563,9 @@ public partial class MainWindow : Window
                 _visibleEntries = _visibleChannels.Select(ChannelListEntry.ForChannel).ToList();
             }
 
-            FolderBackButton.Visibility = result.ShowBackButton ? Visibility.Visible : Visibility.Collapsed;
+            FolderBackButton.Visibility = (result.ShowBackButton || seriesEpisodes is not null) ? Visibility.Visible : Visibility.Collapsed;
             CountText.Text = result.CountText;
+            UpdateBreadcrumb();
             ChannelList.ItemsSource = _visibleEntries;
             SelectPlayingChannelInVisibleList();
             if (!string.IsNullOrWhiteSpace(result.StatusText))
@@ -677,6 +690,29 @@ public partial class MainWindow : Window
         };
     }
 
+    // Episodes aren't part of the main catalog (fetched on demand per series), so
+    // this bypasses the folder/letter/kind machinery entirely and just applies the
+    // search box to whatever series is currently drilled into.
+    private static FilterResult BuildSeriesFilterResult(IReadOnlyList<Channel> episodes, string search, CancellationToken cancellationToken)
+    {
+        var queryParts = SplitSearchQuery(search);
+        var filtered = new List<Channel>(episodes.Count);
+        foreach (var episode in episodes)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!MatchesSearch(episode, queryParts)) continue;
+            filtered.Add(episode);
+        }
+
+        return new FilterResult
+        {
+            FilteredChannels = filtered,
+            VisibleChannels = filtered,
+            ShowBackButton = true,
+            CountText = $"{filtered.Count:N0} episodes"
+        };
+    }
+
     // Buckets a channel/movie under its first letter (A-Z), first digit (0-9),
     // or "#" for anything else (blank names, symbols, non-Latin titles, etc).
     private static string GetNameBucketKey(string? name)
@@ -764,6 +800,7 @@ public partial class MainWindow : Window
         // Keep whatever folder you've drilled into (e.g. via Folders mode) so
         // switching to A-Z buckets just that folder instead of everything.
         _activeLetter = null;
+        ClearActiveSeries();
         UpdateSearchScopeButtons();
         ApplyFilters();
     }
@@ -779,6 +816,7 @@ public partial class MainWindow : Window
             _activeLetter = null;
         }
 
+        ClearActiveSeries();
         _mediaKindMode = nextMode;
         UpdateMediaKindButtons();
         ApplyFilters();
@@ -787,8 +825,104 @@ public partial class MainWindow : Window
     private void SetViewMode(int viewMode)
     {
         _viewMode = Math.Clamp(viewMode, 0, 2);
+        ClearActiveSeries();
         UpdateViewModeButtons();
         ApplyFilters();
+    }
+
+    private void ClearActiveSeries()
+    {
+        _activeSeriesId = null;
+        _activeSeriesName = null;
+        _activeSeriesEpisodes = null;
+    }
+
+    // Windows-Explorer-style clickable path (e.g. "Series / Persian Series Foreign /
+    // Cape Fear 2026"). Lives on its own row below the title/Back button so a long
+    // folder or series name can never crowd the Back button off to the side.
+    private void UpdateBreadcrumb()
+    {
+        var segments = new List<(string Label, Action? OnClick)>();
+
+        if (_activeFolder is not null || _activeLetter is not null || _activeSeriesId is not null)
+        {
+            var rootLabel = _mediaKindMode switch
+            {
+                1 => "Live TV",
+                2 => "Movies",
+                3 => "Series",
+                _ => "All media"
+            };
+            segments.Add((rootLabel, () =>
+            {
+                _activeFolder = null;
+                _activeLetter = null;
+                ClearActiveSeries();
+                ApplyFilters();
+            }));
+        }
+
+        if (_activeFolder is not null)
+        {
+            segments.Add((_activeFolder, () =>
+            {
+                _activeLetter = null;
+                ClearActiveSeries();
+                ApplyFilters();
+            }));
+        }
+
+        if (_activeLetter is not null)
+        {
+            segments.Add((_activeLetter, () =>
+            {
+                ClearActiveSeries();
+                ApplyFilters();
+            }));
+        }
+
+        if (_activeSeriesId is not null)
+        {
+            // Current position -- not clickable, nothing deeper to collapse back from.
+            segments.Add((_activeSeriesName ?? "Series", null));
+        }
+
+        BreadcrumbPanel.Children.Clear();
+        if (segments.Count == 0)
+        {
+            BreadcrumbPanel.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        BreadcrumbPanel.Visibility = Visibility.Visible;
+        for (var i = 0; i < segments.Count; i++)
+        {
+            if (i > 0)
+            {
+                var separator = new TextBlock { Text = " / ", VerticalAlignment = VerticalAlignment.Center };
+                separator.SetResourceReference(TextBlock.ForegroundProperty, "Text2Brush");
+                BreadcrumbPanel.Children.Add(separator);
+            }
+
+            var (label, onClick) = segments[i];
+            var isCurrent = onClick is null;
+            var segment = new TextBlock
+            {
+                Text = label,
+                VerticalAlignment = VerticalAlignment.Center,
+                FontWeight = isCurrent ? FontWeights.SemiBold : FontWeights.Normal,
+                Cursor = isCurrent ? System.Windows.Input.Cursors.Arrow : System.Windows.Input.Cursors.Hand,
+                TextDecorations = isCurrent ? null : TextDecorations.Underline
+            };
+            segment.SetResourceReference(TextBlock.ForegroundProperty, isCurrent ? "Text0Brush" : "Text2Brush");
+
+            if (onClick is not null)
+            {
+                segment.MouseLeftButtonUp += (_, _) => onClick();
+            }
+
+            BreadcrumbPanel.Children.Add(segment);
+        }
     }
 
     private void UpdateSearchScopeButtons()
@@ -855,19 +989,65 @@ public partial class MainWindow : Window
         ActivateSelectedListEntry();
     }
 
-    private void FolderBack_Click(object sender, RoutedEventArgs e)
+    private async void FolderBack_Click(object sender, RoutedEventArgs e)
     {
-        // Pop one level at a time: out of a letter drill-down first (back to
-        // that folder's letter buckets), then out of the folder itself.
-        if (_activeLetter is not null)
+        // Pop one level at a time: out of a series' episode list first (back to
+        // wherever that series was listed), then a letter drill-down (back to that
+        // folder's letter buckets), then out of the folder itself. Remember exactly
+        // what we're backing out of so the restored list can scroll/select back to
+        // it, instead of resetting to the top of what can be a very long list.
+        string? restoreFolderOrLetterName = null;
+        string? restoreSeriesId = null;
+
+        if (_activeSeriesId is not null)
         {
+            restoreSeriesId = _activeSeriesId;
+            ClearActiveSeries();
+        }
+        else if (_activeLetter is not null)
+        {
+            restoreFolderOrLetterName = _activeLetter;
             _activeLetter = null;
         }
         else
         {
+            restoreFolderOrLetterName = _activeFolder;
             _activeFolder = null;
         }
-        ApplyFilters();
+
+        await ApplyFiltersAsync();
+        RestoreListSelectionAfterBack(restoreFolderOrLetterName, restoreSeriesId);
+    }
+
+    private void RestoreListSelectionAfterBack(string? folderOrLetterName, string? seriesId)
+    {
+        ChannelListEntry? match = null;
+
+        if (folderOrLetterName is not null)
+        {
+            match = _visibleEntries.FirstOrDefault(entry =>
+                entry.IsFolder && string.Equals(entry.FolderName, folderOrLetterName, StringComparison.OrdinalIgnoreCase));
+        }
+        else if (seriesId is not null)
+        {
+            match = _visibleEntries.FirstOrDefault(entry =>
+                entry.Channel is not null &&
+                SeriesPlaceholder.TryGetSeriesId(entry.Channel, out var id) &&
+                string.Equals(id, seriesId, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (match is null) return;
+
+        _suppressChannelSelectionChange = true;
+        try
+        {
+            ChannelList.SelectedItem = match;
+            ChannelList.ScrollIntoView(match);
+        }
+        finally
+        {
+            _suppressChannelSelectionChange = false;
+        }
     }
 
     private void ActivateSelectedListEntry()
@@ -902,6 +1082,17 @@ public partial class MainWindow : Window
 
     private void SelectChannelInList(Channel channel)
     {
+        if (channel.MediaKind == MediaKind.Series && !SeriesPlaceholder.TryGetSeriesId(channel, out _))
+        {
+            // Resolved episodes carry a synthetic "Season N" group that isn't part
+            // of the main catalog -- deriving folder/letter scope from it would
+            // filter the whole list down to nothing. If we're already showing this
+            // series' episode list (via EnterSeriesAsync) just highlight the one
+            // that's playing; otherwise (e.g. replayed from Recent) leave scope as-is.
+            SelectPlayingChannelInVisibleList();
+            return;
+        }
+
         if (_browseMode == 0)
         {
             _activeFolder = NormalizeGroupName(channel.Group);
@@ -964,6 +1155,16 @@ public partial class MainWindow : Window
 
     private void PlayChannel(Channel channel, int? autoCandidateIndex, long? resumeTimeMs)
     {
+        // Series entries loaded via the Xtream API fallback are placeholders (one per
+        // series, not per episode) since listing episodes requires a separate API call
+        // per series. Route these into the episode list (like drilling into a folder)
+        // instead of trying to play them.
+        if (SeriesPlaceholder.TryGetSeriesId(channel, out var seriesId))
+        {
+            _ = EnterSeriesAsync(channel.Name, seriesId);
+            return;
+        }
+
         try
         {
             AppLogger.Info("PlayChannel begin. requestedIndex=" + (autoCandidateIndex?.ToString() ?? "auto") + "; resumeTimeMs=" + (resumeTimeMs?.ToString() ?? "none") + "; " + AppLogger.DescribeChannel(channel));
@@ -1021,6 +1222,48 @@ public partial class MainWindow : Window
         {
             AppLogger.Error("PlayChannel failed. " + AppLogger.DescribeChannel(channel), ex);
             StatusText.Text = "Play error: " + ex.Message;
+        }
+    }
+
+    // Drills into a series exactly like entering a folder: episodes replace the
+    // current list and the existing folder-back button/gesture pops back out to
+    // wherever the series was listed. Fetched on demand (one API call per series)
+    // rather than up front, since this account has 46,000+ series.
+    private async Task EnterSeriesAsync(string seriesName, string seriesId)
+    {
+        AppLogger.Info("Entering series. seriesId=" + seriesId + "; seriesName=" + seriesName);
+        StatusText.Text = "Loading episodes for " + seriesName + "...";
+        Cursor = System.Windows.Input.Cursors.Wait;
+
+        try
+        {
+            var account = _state.Account.Clone();
+            var episodes = await Task.Run(() => _playlistService.FetchSeriesEpisodesAsync(account, seriesId, CancellationToken.None));
+            if (episodes.Count == 0)
+            {
+                StatusText.Text = "No episodes were found for " + seriesName + ".";
+                return;
+            }
+
+            _activeSeriesId = seriesId;
+            _activeSeriesName = seriesName;
+            _activeSeriesEpisodes = episodes.ToList();
+            await ApplyFiltersAsync();
+            if (_visibleEntries.Count > 0)
+            {
+                ChannelList.SelectedIndex = 0;
+                ChannelList.ScrollIntoView(ChannelList.SelectedItem);
+            }
+            StatusText.Text = $"Loaded {episodes.Count:N0} episodes for {seriesName}.";
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Failed to load series episodes. seriesId=" + seriesId, ex);
+            StatusText.Text = "Could not load episodes: " + ex.Message;
+        }
+        finally
+        {
+            Cursor = null;
         }
     }
 
@@ -2235,10 +2478,15 @@ public partial class MainWindow : Window
         _visibleEntries = [];
         _activeFolder = null;
         _activeLetter = null;
+        _activeSeriesId = null;
+        _activeSeriesName = null;
+        _activeSeriesEpisodes = null;
 
         SearchBox.Clear();
         ChannelList.ItemsSource = null;
         FolderBackButton.Visibility = Visibility.Collapsed;
+        BreadcrumbPanel.Children.Clear();
+        BreadcrumbPanel.Visibility = Visibility.Collapsed;
         CountText.Text = "0 items";
         NowPlayingText.Text = "Select a channel to play";
         UpdateEpgDisplay();
@@ -2463,7 +2711,7 @@ public partial class MainWindow : Window
                 case "back":
                     if (_isFullScreen) ToggleFullScreen();
                     else if (!_channelsVisible) ToggleChannels_Click(this, new RoutedEventArgs());
-                    else if (_activeFolder is not null || _activeLetter is not null) FolderBack_Click(this, new RoutedEventArgs());
+                    else if (_activeSeriesId is not null || _activeFolder is not null || _activeLetter is not null) FolderBack_Click(this, new RoutedEventArgs());
                     break;
             }
         }));

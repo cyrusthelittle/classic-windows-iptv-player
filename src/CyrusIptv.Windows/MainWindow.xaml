@@ -96,25 +96,37 @@
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
 
-                    <DockPanel Margin="0,0,0,12">
-                        <StackPanel Orientation="Horizontal" DockPanel.Dock="Left">
-                            <Image Source="Assets/iptv-logo.png"
-                                   Width="32" Height="32"
-                                   Margin="0,0,10,0"
-                                   Stretch="Uniform" />
-                            <TextBlock Text="Channels" FontSize="22" FontWeight="Bold" VerticalAlignment="Center" />
-                        </StackPanel>
-                        <StackPanel Orientation="Horizontal" DockPanel.Dock="Right" HorizontalAlignment="Right">
-                            <Button x:Name="FolderBackButton"
-                                    Style="{StaticResource GhostButton}"
-                                    Content="Back"
-                                    Visibility="Collapsed"
-                                    Margin="0,0,10,0"
-                                    Padding="10,5"
-                                    Click="FolderBack_Click" />
-                            <TextBlock x:Name="CountText" Text="0" Foreground="{DynamicResource Text2Brush}" VerticalAlignment="Center" />
-                        </StackPanel>
-                    </DockPanel>
+                    <Grid Margin="0,0,0,12">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <DockPanel Grid.Row="0">
+                            <StackPanel Orientation="Horizontal" DockPanel.Dock="Left">
+                                <Image Source="Assets/iptv-logo.png"
+                                       Width="32" Height="32"
+                                       Margin="0,0,10,0"
+                                       Stretch="Uniform" />
+                                <TextBlock Text="Channels" FontSize="22" FontWeight="Bold" VerticalAlignment="Center" />
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" DockPanel.Dock="Right" HorizontalAlignment="Right">
+                                <Button x:Name="FolderBackButton"
+                                        Style="{StaticResource GhostButton}"
+                                        Content="Back"
+                                        Visibility="Collapsed"
+                                        Margin="0,0,10,0"
+                                        Padding="10,5"
+                                        Click="FolderBack_Click" />
+                                <TextBlock x:Name="CountText" Text="0" Foreground="{DynamicResource Text2Brush}" VerticalAlignment="Center" />
+                            </StackPanel>
+                        </DockPanel>
+
+                        <!-- Windows-Explorer-style path (e.g. "Series / Persian Series Foreign / Cape Fear 2026").
+                             On its own row so a long folder/series name can never crowd out the Back button above.
+                             Populated in code-behind (UpdateBreadcrumb) since each segment needs its own click handler. -->
+                        <WrapPanel x:Name="BreadcrumbPanel" Grid.Row="1" Margin="0,6,0,0" Visibility="Collapsed" />
+                    </Grid>
 
                     <Grid Grid.Row="1" Margin="0,0,0,10">
                         <Grid.RowDefinitions>
@@ -378,7 +390,7 @@
 
                         <TextBlock x:Name="StreamInfoText"
                                    Grid.Row="4"
-                                   Text="State: Not ready | Resolution: detecting | Bandwidth: detecting | Bitrate: detecting"
+                                   Text="State: Not ready | Resolution: detecting | Bandwidth: detecting | FPS: detecting | Video codec: detecting | Audio codec: detecting | Audio: detecting"
                                    Margin="0,10,0,0"
                                    Foreground="{DynamicResource Text2Brush}"
                                    TextWrapping="Wrap" />

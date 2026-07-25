@@ -21,17 +21,23 @@ public sealed class StreamInfoTracker
             var trackBitrate = TryReadTrackBitrate(mediaPlayer, currentMedia);
             var measured = UpdateMeasuredBandwidth(stats.ReadBytes);
             var bandwidthText = FormatBandwidth(measured, stats.InputBitrate ?? stats.DemuxBitrate ?? trackBitrate);
-            var bitrateText = FormatStatsBitrate(stats.InputBitrate, stats.DemuxBitrate, trackBitrate, measured);
+            var fpsText = FormatFps(mediaPlayer?.Fps);
+            var trackDetails = TryReadTrackDetails(mediaPlayer, currentMedia);
+            var playing = mediaPlayer?.IsPlaying == true;
+            var videoCodecText = trackDetails.VideoCodec ?? (playing ? "detecting" : "not playing");
+            var audioCodecText = trackDetails.AudioCodec ?? (playing ? "detecting" : "not playing");
+            var audioFormatText = FormatAudioFormat(trackDetails.AudioChannels, trackDetails.AudioRate) ?? (playing ? "detecting" : "not playing");
             var bufferText = $"{bufferMs:N0} ms";
             var shortText = $"{stateText} • {resolutionText} • {bandwidthText} • {sourceLabel}";
             var fullText =
-                $"State: {stateText}   |   Resolution: {resolutionText}   |   Bandwidth: {bandwidthText}   |   Bitrate: {bitrateText}\n" +
+                $"State: {stateText}   |   Resolution: {resolutionText}   |   Bandwidth: {bandwidthText}   |   FPS: {fpsText}\n" +
+                $"Video codec: {videoCodecText}   |   Audio codec: {audioCodecText}   |   Audio: {audioFormatText}\n" +
                 $"Buffer: {bufferText}   |   Source: {sourceMode} / {sourceLabel}   |   Channel: {(string.IsNullOrWhiteSpace(channelName) ? "none" : channelName)}";
-            return new StreamInfoSnapshot(stateText, resolutionText, bandwidthText, bitrateText, bufferText, sourceLabel, fullText, shortText);
+            return new StreamInfoSnapshot(stateText, resolutionText, bandwidthText, fpsText, videoCodecText, audioCodecText, audioFormatText, bufferText, sourceLabel, fullText, shortText);
         }
         catch
         {
-            return new StreamInfoSnapshot("Unknown", "detecting", "detecting", "detecting", $"{bufferMs:N0} ms", sourceLabel, "Stream information is not available yet.", "Stream info unavailable");
+            return new StreamInfoSnapshot("Unknown", "detecting", "detecting", "detecting", "detecting", "detecting", "detecting", $"{bufferMs:N0} ms", sourceLabel, "Stream information is not available yet.", "Stream info unavailable");
         }
     }
 
@@ -132,6 +138,72 @@ public sealed class StreamInfoTracker
         }
     }
 
+    private static (string? VideoCodec, string? AudioCodec, long? AudioChannels, long? AudioRate) TryReadTrackDetails(MediaPlayer? mediaPlayer, Media? currentMedia)
+    {
+        try
+        {
+            var media = ReadMember(mediaPlayer, "Media") ?? currentMedia;
+            var tracks = ReadMember(media, "Tracks") as System.Collections.IEnumerable;
+            if (tracks is null) return (null, null, null, null);
+
+            string? videoCodec = null;
+            string? audioCodec = null;
+            long? audioChannels = null;
+            long? audioRate = null;
+
+            foreach (var track in tracks)
+            {
+                var trackType = ReadMember(track, "TrackType")?.ToString();
+                if (videoCodec is null && string.Equals(trackType, "Video", StringComparison.Ordinal))
+                {
+                    videoCodec = DescribeCodec(track);
+                }
+                else if (audioCodec is null && string.Equals(trackType, "Audio", StringComparison.Ordinal))
+                {
+                    audioCodec = DescribeCodec(track);
+                    var audioData = ReadMember(ReadMember(track, "Data"), "Audio");
+                    audioChannels = ConvertToNullableLong(ReadMember(audioData, "Channels"));
+                    audioRate = ConvertToNullableLong(ReadMember(audioData, "Rate"));
+                }
+            }
+
+            return (videoCodec, audioCodec, audioChannels, audioRate);
+        }
+        catch
+        {
+            return (null, null, null, null);
+        }
+    }
+
+    // LibVLC's track "description"/"language" fields are rarely filled in for
+    // video/audio (mainly used for subtitle track labels), so the codec name
+    // comes from decoding the FourCC identifier instead (e.g. 'h264', 'mp4a').
+    private static string? DescribeCodec(object? track)
+    {
+        var fourCc = ConvertToNullableLong(ReadMember(track, "Codec"));
+        return FormatFourCc(fourCc);
+    }
+
+    private static string? FormatFourCc(long? value)
+    {
+        if (!value.HasValue || value.Value <= 0) return null;
+
+        var bytes = BitConverter.GetBytes((uint)value.Value);
+        var chars = bytes.Where(b => b != 0).Select(b => b is >= 0x20 and < 0x7F ? (char)b : '?').ToArray();
+        var text = new string(chars).Trim();
+        return text.Length == 0 ? null : text.ToUpperInvariant();
+    }
+
+    private static string? FormatAudioFormat(long? channels, long? rate)
+    {
+        if (!channels.HasValue && !rate.HasValue) return null;
+
+        var parts = new List<string>();
+        if (channels is > 0) parts.Add(channels == 1 ? "mono" : channels == 2 ? "stereo" : $"{channels}ch");
+        if (rate is > 0) parts.Add($"{rate.Value / 1000.0:0.#} kHz");
+        return parts.Count > 0 ? string.Join(", ", parts) : null;
+    }
+
     private double? UpdateMeasuredBandwidth(long? readBytes)
     {
         if (!readBytes.HasValue) return _lastMeasuredMbps;
@@ -152,16 +224,6 @@ public sealed class StreamInfoTracker
         return _lastMeasuredMbps;
     }
 
-    private static string FormatStatsBitrate(double? inputBitrate, double? demuxBitrate, double? trackBitrate, double? measuredMbps)
-    {
-        var values = new List<string>();
-        AddBitrate(values, "input", inputBitrate);
-        AddBitrate(values, "demux", demuxBitrate);
-        AddBitrate(values, "track", trackBitrate);
-        if (values.Count > 0) return string.Join(", ", values);
-        return measuredMbps.HasValue ? $"estimated {measuredMbps.Value:0.00} Mbps" : "waiting for stream data";
-    }
-
     private static string FormatBandwidth(double? measuredMbps, double? fallbackBitrate)
     {
         if (measuredMbps.HasValue) return $"{measuredMbps.Value:0.00} Mbps";
@@ -170,20 +232,10 @@ public sealed class StreamInfoTracker
         return fallbackMbps.HasValue ? $"estimated {fallbackMbps.Value:0.00} Mbps" : "detecting";
     }
 
-    private static void AddBitrate(List<string> values, string label, double? value)
+    private static string FormatFps(float? fps)
     {
-        var text = FormatUnknownBitrate(value);
-        if (text is not null) values.Add(label + " " + text);
-    }
-
-    private static string? FormatUnknownBitrate(double? value)
-    {
-        if (!value.HasValue || double.IsNaN(value.Value) || double.IsInfinity(value.Value) || value.Value <= 0) return null;
-
-        var mbps = NormalizeBitrateToMbps(value);
-        if (!mbps.HasValue) return null;
-
-        return $"{mbps.Value:0.00} Mbps";
+        if (!fps.HasValue || fps.Value <= 0 || float.IsNaN(fps.Value) || float.IsInfinity(fps.Value)) return "detecting";
+        return $"{fps.Value:0.##}";
     }
 
     private static double? NormalizeBitrateToMbps(double? value)
@@ -235,7 +287,10 @@ public sealed record StreamInfoSnapshot(
     string State,
     string Resolution,
     string Bandwidth,
-    string Bitrate,
+    string Fps,
+    string VideoCodec,
+    string AudioCodec,
+    string AudioFormat,
     string Buffer,
     string Source,
     string FullText,
