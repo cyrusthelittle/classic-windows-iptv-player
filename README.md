@@ -8,6 +8,8 @@ Grab the latest ready-to-run build from the [Releases page](../../releases/lates
 
 No installation is required. Keep the extracted folder together—the EXE needs `libvlc.dll`, `libvlccore.dll`, and the `plugins` folder next to it.
 
+The app is portable. `accounts.json`, the `logs` folder, and the `cache` folder are stored beside the executable. Keep `accounts.json` private because accounts may contain provider credentials.
+
 ### Requirements to run
 
 - Windows 10 or 11, 64-bit
@@ -78,10 +80,10 @@ EPG is disabled by default. Turn it on with **Settings → Programme guide (EPG)
 
 ## Troubleshooting
 
-If startup fails, check:
+If startup fails, check the `logs` folder beside the executable:
 
 ```text
-%LOCALAPPDATA%\ClassicWindowsIptvPlayer\startup-crash.log
+logs\startup-crash.log
 ```
 
 If LibVLC files are missing, run:

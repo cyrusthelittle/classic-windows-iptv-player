@@ -8,9 +8,9 @@
     <Nullable>enable</Nullable>
     <AssemblyName>Classic Windows IPTV Player</AssemblyName>
     <RootNamespace>ClassicWindowsIptvPlayer.Windows</RootNamespace>
-    <Version>0.5.9</Version>
-    <FileVersion>0.5.9.0</FileVersion>
-    <AssemblyVersion>0.5.9.0</AssemblyVersion>
+    <Version>0.6.0</Version>
+    <FileVersion>0.6.0.0</FileVersion>
+    <AssemblyVersion>0.6.0.0</AssemblyVersion>
     <PlatformTarget>x64</PlatformTarget>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>

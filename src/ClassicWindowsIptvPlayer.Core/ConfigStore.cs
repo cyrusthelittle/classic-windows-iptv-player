@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Text.Json;
 
 namespace ClassicWindowsIptvPlayer.Core;
@@ -21,41 +22,42 @@ public sealed class ConfigStore
     public ConfigStore()
     {
         var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        _appFolder = Path.Combine(appData, "ClassicWindowsIptvPlayer");
-        MigrateLegacyData(appData, _appFolder);
+        var executableFolder = AppContext.BaseDirectory;
+        _appFolder = Path.Combine(executableFolder, "cache");
+        _statePath = Path.Combine(executableFolder, "accounts.json");
+        MigrateLegacyData(appData, _statePath, _appFolder);
         Directory.CreateDirectory(_appFolder);
-        _statePath = Path.Combine(_appFolder, "state.json");
         _channelCachePath = Path.Combine(_appFolder, "channels.json.gz");
     }
 
-    private static void MigrateLegacyData(string appData, string destination)
+    private static void MigrateLegacyData(string appData, string statePath, string cacheFolder)
     {
-        if (Directory.Exists(destination)) return;
-
-        var legacy = Path.Combine(appData, "CyrusIptv");
-        if (!Directory.Exists(legacy)) return;
-
-        try
+        var sources = new[]
         {
-            Directory.Move(legacy, destination);
-        }
-        catch
+            Path.Combine(appData, "ClassicWindowsIptvPlayer"),
+            Path.Combine(appData, "CyrusIptv")
+        };
+
+        Directory.CreateDirectory(cacheFolder);
+        foreach (var source in sources.Where(Directory.Exists))
         {
-            // A locked cache should not prevent migration of the account state.
-            Directory.CreateDirectory(destination);
-            foreach (var sourceFile in Directory.GetFiles(legacy, "*", SearchOption.AllDirectories))
+            try
             {
-                try
+                var sourceState = Path.Combine(source, "state.json");
+                if (!File.Exists(statePath) && File.Exists(sourceState))
                 {
-                    var relativePath = Path.GetRelativePath(legacy, sourceFile);
-                    var destinationFile = Path.Combine(destination, relativePath);
-                    Directory.CreateDirectory(Path.GetDirectoryName(destinationFile)!);
-                    File.Copy(sourceFile, destinationFile, overwrite: false);
+                    File.Copy(sourceState, statePath);
                 }
-                catch
+
+                foreach (var sourceCache in Directory.GetFiles(source, "channels*.json.gz", SearchOption.TopDirectoryOnly))
                 {
-                    // Continue with the remaining state/cache files.
+                    var destinationCache = Path.Combine(cacheFolder, Path.GetFileName(sourceCache));
+                    if (!File.Exists(destinationCache)) File.Copy(sourceCache, destinationCache);
                 }
+            }
+            catch
+            {
+                // Continue with any other compatible data location.
             }
         }
     }

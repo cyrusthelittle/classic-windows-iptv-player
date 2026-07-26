@@ -202,14 +202,13 @@ public partial class MainWindow : Window
             // on a cached-playlist launch, where the playlist load is fast but
             // used to sit behind the (slower) player init anyway.
             var playerTask = InitializePlayerAsync();
-            var channelsTask = LoadChannelsAsync(_login.UpdatePlaylist);
+            var channelsTask = LoadChannelsAsync(_login.UpdatePlaylist, keepLoadingVisible: true);
 
-            await playerTask;
+            await Task.WhenAll(playerTask, channelsTask);
             InitializeBufferBox();
             InitializeVolumeControls();
             ApplyRemoteControlState(showStatus: false);
-
-            await channelsTask;
+            HideAccountLoading();
         }
         catch (Exception ex)
         {
@@ -251,6 +250,7 @@ public partial class MainWindow : Window
         _tuner.StateChanged += OnTunerStateChanged;
         _positionTimer.Start();
         RefreshSubtitleTracks();
+        AppLogger.Info("LibVLC player initialized.");
     }
 
     private void InitializeVideoSurface()
@@ -414,7 +414,7 @@ public partial class MainWindow : Window
         UpdateFavoriteButton();
     }
 
-    private async Task LoadChannelsAsync(bool updatePlaylist)
+    private async Task LoadChannelsAsync(bool updatePlaylist, bool keepLoadingVisible = false)
     {
         var accountId = _state.SelectedAccountId;
         AppLogger.Info("LoadChannelsAsync begin. updatePlaylist=" + updatePlaylist + "; accountId=" + _state.SelectedAccountId);
@@ -465,7 +465,7 @@ public partial class MainWindow : Window
         }
         finally
         {
-            HideAccountLoading();
+            if (!keepLoadingVisible) HideAccountLoading();
         }
     }
 

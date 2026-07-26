@@ -106,9 +106,8 @@ public partial class App : WpfApplication
     {
         try
         {
-            var dir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "ClassicWindowsIptvPlayer");
+            var dir = Path.GetDirectoryName(AppLogger.CurrentLogPath)
+                ?? Path.Combine(AppContext.BaseDirectory, "logs");
             Directory.CreateDirectory(dir);
             File.WriteAllText(Path.Combine(dir, fileName), ex.ToString());
         }

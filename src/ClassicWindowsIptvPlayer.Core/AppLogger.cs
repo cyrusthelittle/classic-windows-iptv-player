@@ -11,10 +11,7 @@ public static class AppLogger
 {
     private const long MaxLogBytes = 5 * 1024 * 1024;
     private static readonly object Sync = new();
-    private static readonly string LogDirectory = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "ClassicWindowsIptvPlayer",
-        "logs");
+    private static readonly string LogDirectory = PreparePortableLogDirectory();
 
     private static readonly string LogPath = Path.Combine(LogDirectory, "app.log");
 
@@ -23,6 +20,38 @@ public static class AppLogger
     public static void Info(string message) => Write("INFO", message, null);
     public static void Warn(string message) => Write("WARN", message, null);
     public static void Error(string message, Exception? exception = null) => Write("ERROR", message, exception);
+
+    private static string PreparePortableLogDirectory()
+    {
+        var destination = Path.Combine(AppContext.BaseDirectory, "logs");
+        try
+        {
+            Directory.CreateDirectory(destination);
+            if (Directory.EnumerateFileSystemEntries(destination).Any()) return destination;
+
+            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            CopyLogFiles(
+                Path.Combine(localAppData, "ClassicWindowsIptvPlayer"),
+                destination);
+        }
+        catch
+        {
+            // Logging itself remains best-effort.
+        }
+
+        return destination;
+    }
+
+    private static void CopyLogFiles(string source, string destination)
+    {
+        if (!Directory.Exists(source)) return;
+
+        foreach (var sourceFile in Directory.GetFiles(source, "*.log", SearchOption.AllDirectories))
+        {
+            var destinationFile = Path.Combine(destination, Path.GetFileName(sourceFile));
+            if (!File.Exists(destinationFile)) File.Copy(sourceFile, destinationFile);
+        }
+    }
 
     public static string DescribeChannel(Channel? channel)
     {
