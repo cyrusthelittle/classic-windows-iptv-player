@@ -1,4 +1,4 @@
-using CyrusIptv.Core;
+using ClassicWindowsIptvPlayer.Core;
 using System;
 using System.IO;
 using System.Threading.Tasks;
@@ -6,7 +6,7 @@ using System.Windows;
 using MessageBox = System.Windows.MessageBox;
 using WpfApplication = System.Windows.Application;
 
-namespace CyrusIptv.Windows;
+namespace ClassicWindowsIptvPlayer.Windows;
 
 public partial class App : WpfApplication
 {
@@ -20,7 +20,7 @@ public partial class App : WpfApplication
             WriteRuntimeCrashLog(e.Exception);
             MessageBox.Show(
                 e.Exception.ToString(),
-                "Cyrus IPTV Modern error",
+                "Classic Windows IPTV Player error",
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
             e.Handled = true;
@@ -85,7 +85,7 @@ public partial class App : WpfApplication
             WriteStartupCrashLog(ex);
             MessageBox.Show(
                 ex.ToString(),
-                "Cyrus IPTV Modern startup error",
+                "Classic Windows IPTV Player startup error",
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
             Shutdown();
@@ -108,7 +108,7 @@ public partial class App : WpfApplication
         {
             var dir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "CyrusIptvModern");
+                "ClassicWindowsIptvPlayer");
             Directory.CreateDirectory(dir);
             File.WriteAllText(Path.Combine(dir, fileName), ex.ToString());
         }

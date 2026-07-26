@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json.Serialization;
 
-namespace CyrusIptv.Core;
+namespace ClassicWindowsIptvPlayer.Core;
 
 // Source-generated (de)serialization for the channel cache avoids reflection-based
 // metadata resolution, which is measurably slower once a playlist reaches the tens
@@ -171,7 +171,14 @@ public sealed class AppState
 
         if (Accounts.Count == 0)
         {
-            Accounts.Add(new SavedAccount { Name = "New account" });
+            Accounts.Add(new SavedAccount
+            {
+                Name = "Free account",
+                Settings = new AccountSettings
+                {
+                    M3uUrl = "https://iptv-org.github.io/iptv/index.country.m3u"
+                }
+            });
         }
 
         if (string.IsNullOrWhiteSpace(SelectedAccountId) ||

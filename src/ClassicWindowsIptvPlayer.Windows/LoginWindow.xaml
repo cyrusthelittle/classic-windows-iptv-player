@@ -1,7 +1,7 @@
-<Window x:Class="CyrusIptv.Windows.LoginWindow"
+<Window x:Class="ClassicWindowsIptvPlayer.Windows.LoginWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Cyrus IPTV Login"
+        Title="Classic Windows IPTV Player Login"
         Width="780" Height="660"
         MinWidth="720" MinHeight="600"
         WindowStartupLocation="CenterScreen"
@@ -24,8 +24,8 @@
                            Margin="0,0,18,0"
                            Stretch="Uniform" />
                     <StackPanel VerticalAlignment="Center">
-                        <TextBlock Text="Cyrus IPTV" FontSize="32" FontWeight="Bold" />
-                        <TextBlock Text="Modern Windows player shell" Foreground="{StaticResource Text2Brush}" Margin="0,6,0,0" />
+                        <TextBlock Text="Classic Windows IPTV Player" FontSize="32" FontWeight="Bold" />
+                        <TextBlock Text="Windows IPTV player" Foreground="{StaticResource Text2Brush}" Margin="0,6,0,0" />
                     </StackPanel>
                 </StackPanel>
 

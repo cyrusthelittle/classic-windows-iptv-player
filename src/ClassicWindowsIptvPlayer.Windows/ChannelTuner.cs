@@ -1,11 +1,11 @@
-using CyrusIptv.Core;
+using ClassicWindowsIptvPlayer.Core;
 using LibVLCSharp.Shared;
 using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace CyrusIptv.Windows;
+namespace ClassicWindowsIptvPlayer.Windows;
 
 public enum TunerStatus
 {

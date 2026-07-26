@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $packageRoot = Join-Path $env:USERPROFILE ".nuget\packages\videolan.libvlc.windows"
 $outputCandidates = @(
-  (Join-Path $repoRoot "release\windows-modern")
+  (Join-Path $repoRoot "release\classic-windows-iptv-player")
 )
 
 function Test-CompleteLibVlcFolder([string]$Folder) {

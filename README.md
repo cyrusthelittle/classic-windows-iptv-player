@@ -1,103 +1,95 @@
-# Cyrus IPTV
+# Classic Windows IPTV Player
 
-A modern IPTV player for Windows, built with WPF and LibVLC on a shared core library.
+A classic Windows IPTV player built with WPF and LibVLC on a shared core library.
 
 ## Download
 
-Grab the latest ready-to-run build from the [Releases page](../../releases/latest) — download `CyrusIptv-Windows-x64.zip`, extract it anywhere, and run `Cyrus IPTV Modern.exe`.
+Grab the latest ready-to-run build from the [Releases page](../../releases/latest), download `Classic-Windows-IPTV-Player-Windows-x64.zip`, extract it anywhere, and run `Classic Windows IPTV Player.exe`.
 
-No installation is required. Keep the extracted folder together — the EXE needs `libvlc.dll`, `libvlccore.dll`, and the `plugins` folder next to it.
+No installation is required. Keep the extracted folder together—the EXE needs `libvlc.dll`, `libvlccore.dll`, and the `plugins` folder next to it.
 
-### Requirements to run (fresh PC)
+### Requirements to run
 
 - Windows 10 or 11, 64-bit
-- ~600 MB free disk space
-- Internet connection (for your IPTV playlist/streams)
-- Nothing else — the .NET runtime and LibVLC are bundled in the download
+- About 600 MB of free disk space
+- An internet connection
+- Nothing else—the .NET runtime and LibVLC are bundled
 
-> **Note:** Windows SmartScreen may warn on first run because the app is unsigned. Click **More info → Run anyway**.
+Windows SmartScreen may warn on first run because the app is unsigned. Click **More info → Run anyway**.
+
+## First-run account
+
+New installations include a credential-free **Free account** using the public [IPTV-org](https://github.com/iptv-org/iptv) country playlist. You can remove it or add your own Xtream or M3U account from the login window.
 
 ## Projects
 
 ```text
-src/CyrusIptv.Core      Shared IPTV logic (no UI)
-src/CyrusIptv.Windows   Windows WPF shell
+src/ClassicWindowsIptvPlayer.Core      Shared IPTV logic (no UI)
+src/ClassicWindowsIptvPlayer.Windows   Windows WPF shell
 ```
 
-### CyrusIptv.Core
-
-Reusable IPTV logic:
+### Core library
 
 - account settings and app state
 - playlist download and M3U/M3U Plus parsing
 - live/movie/series classification
 - XMLTV programme-guide download, parsing, and channel matching
-- account info lookup
-- stream candidate builder
-- compressed playlist cache
-- fast search index
-- stream probing
+- account information lookup
+- stream candidate building and probing
+- compressed playlist cache and fast search index
 
-### CyrusIptv.Windows
+### Windows app
 
-Windows WPF app:
+- account login with playlist caching
+- live/movie/series filters, search, folders, favorites, and recent items
+- built-in LibVLC player with full-screen playback
+- stream information, source and buffer selection, seeking, volume, and mute
+- current and next programme display
+- local-network remote control
 
-- login window with playlist update / login from cache
-- live/movie/series filter, search, channel list, favorites
-- built-in LibVLC player with full-screen window
-- stream information (state, resolution, bandwidth, bitrate, buffer, source)
-- source selector, buffer selector, VOD seek bar, volume/mute
-- current and next programme display for live channels, with full descriptions in tooltips
-- right-click playback menu (windowed and full-screen)
-- remote-control toggle
+## Build from source
 
-## Requirements to build from source
+Requirements:
 
-- Windows 10/11 x64
+- Windows 10 or 11, 64-bit
 - [.NET SDK 10](https://dotnet.microsoft.com/download/dotnet/10.0)
 
-## Build
-
-There is one way to build the app:
+Run:
 
 ```bat
-scripts\BUILD_WINDOWS_MODERN_RELEASE.bat
+scripts\BUILD_WINDOWS_RELEASE.bat
 ```
 
-This publishes a self-contained build to:
+The self-contained app is published to:
 
 ```text
-release\windows-modern
+release\classic-windows-iptv-player
 ```
 
-Keep that folder together — the EXE needs `libvlc.dll`, `libvlccore.dll`, and the `plugins` folder next to it.
-
-## Run during development
+For development:
 
 ```bat
-scripts\RUN_WINDOWS_MODERN.bat
+scripts\RUN_WINDOWS.bat
 ```
 
-## Programme guide (EPG)
+## Programme guide
 
-EPG is disabled by default. Turn it on with **Settings → Programme guide (EPG)**. Xtream accounts then automatically use the provider's `xmltv.php` guide. For a direct M3U account, enter an XMLTV or XMLTV `.gz` URL in the optional **EPG URL** field. The guide matches channels by `tvg-id` first and falls back to the channel/display name.
-
-The current and next programmes appear below the playback controls. Hover a programme to see its category and description. Use **Playlist → Refresh programme guide** to fetch it again without reloading the playlist.
+EPG is disabled by default. Turn it on with **Settings → Programme guide (EPG)**. Xtream accounts automatically use the provider's `xmltv.php` guide. For a direct M3U account, enter an XMLTV or XMLTV `.gz` URL in the optional **EPG URL** field.
 
 ## Troubleshooting
 
-If startup fails, check the log file:
+If startup fails, check:
 
 ```text
-%LOCALAPPDATA%\CyrusIptvModern\startup-crash.log
+%LOCALAPPDATA%\ClassicWindowsIptvPlayer\startup-crash.log
 ```
 
-If LibVLC files are missing from the release folder, run:
+If LibVLC files are missing, run:
 
 ```bat
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\RepairWindowsLibVlc.ps1
 ```
 
-## Legal note
+## Legal
 
-This app is for legal IPTV accounts and playlists only. It does not include channels, credentials, or IPTV content.
+Use only playlists and IPTV services you are authorized to access. The application bundles no paid channels or private credentials.

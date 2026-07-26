@@ -3,7 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 
-namespace CyrusIptv.Windows;
+namespace ClassicWindowsIptvPlayer.Windows;
 
 public sealed class StreamInfoTracker
 {

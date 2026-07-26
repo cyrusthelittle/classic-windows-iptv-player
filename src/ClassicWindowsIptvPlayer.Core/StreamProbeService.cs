@@ -6,7 +6,7 @@ using System.Net.Http.Headers;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace CyrusIptv.Core;
+namespace ClassicWindowsIptvPlayer.Core;
 
 public sealed record StreamProbeResult(
     PlaybackCandidate Candidate,

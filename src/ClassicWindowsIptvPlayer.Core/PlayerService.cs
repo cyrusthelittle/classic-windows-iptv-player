@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
 
-namespace CyrusIptv.Core;
+namespace ClassicWindowsIptvPlayer.Core;
 
 public sealed record PlaybackCandidate(string Url, string Label);
 

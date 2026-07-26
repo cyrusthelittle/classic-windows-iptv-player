@@ -3,7 +3,7 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Shapes;
 
-namespace CyrusIptv.Windows;
+namespace ClassicWindowsIptvPlayer.Windows;
 
 internal static class IconFactory
 {

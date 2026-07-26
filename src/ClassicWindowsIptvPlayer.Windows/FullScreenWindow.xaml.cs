@@ -8,7 +8,7 @@ using KeyEventArgs = System.Windows.Input.KeyEventArgs;
 using MessageBox = System.Windows.MessageBox;
 using MouseEventArgs = System.Windows.Input.MouseEventArgs;
 
-namespace CyrusIptv.Windows;
+namespace ClassicWindowsIptvPlayer.Windows;
 
 public partial class FullScreenWindow : Window
 {

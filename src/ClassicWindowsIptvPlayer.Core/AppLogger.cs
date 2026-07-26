@@ -5,7 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 
-namespace CyrusIptv.Core;
+namespace ClassicWindowsIptvPlayer.Core;
 
 public static class AppLogger
 {
@@ -13,7 +13,7 @@ public static class AppLogger
     private static readonly object Sync = new();
     private static readonly string LogDirectory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "CyrusIptvModern",
+        "ClassicWindowsIptvPlayer",
         "logs");
 
     private static readonly string LogPath = Path.Combine(LogDirectory, "app.log");

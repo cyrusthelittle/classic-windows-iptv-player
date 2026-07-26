@@ -2,7 +2,7 @@ using System.Collections.Generic;
 using System.Windows.Media;
 using WpfApplication = System.Windows.Application;
 
-namespace CyrusIptv.Windows;
+namespace ClassicWindowsIptvPlayer.Windows;
 
 // Swaps the color/brush resources declared in App.xaml between the light and
 // dark palettes. All XAML that should follow the theme references these keys

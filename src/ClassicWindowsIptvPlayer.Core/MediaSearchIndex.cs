@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 
-namespace CyrusIptv.Core;
+namespace ClassicWindowsIptvPlayer.Core;
 
 public sealed class MediaSearchIndex
 {

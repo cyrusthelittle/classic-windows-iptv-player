@@ -6,15 +6,15 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <AssemblyName>Cyrus IPTV Modern</AssemblyName>
-    <RootNamespace>CyrusIptv.Windows</RootNamespace>
-    <Version>0.5.8</Version>
-    <FileVersion>0.5.8.0</FileVersion>
-    <AssemblyVersion>0.5.8.0</AssemblyVersion>
+    <AssemblyName>Classic Windows IPTV Player</AssemblyName>
+    <RootNamespace>ClassicWindowsIptvPlayer.Windows</RootNamespace>
+    <Version>0.5.9</Version>
+    <FileVersion>0.5.9.0</FileVersion>
+    <AssemblyVersion>0.5.9.0</AssemblyVersion>
     <PlatformTarget>x64</PlatformTarget>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
-    <ApplicationIcon>Assets\CyrusIptv.ico</ApplicationIcon>
+    <ApplicationIcon>Assets\ClassicWindowsIptvPlayer.ico</ApplicationIcon>
     <!-- App is x64-only; skip bundling the x86/arm64 native LibVLC binaries (~180 MB) -->
     <VlcWindowsX64Enabled>true</VlcWindowsX64Enabled>
     <VlcWindowsX86Enabled>false</VlcWindowsX86Enabled>
@@ -24,14 +24,14 @@
   </PropertyGroup>
   <ItemGroup>
     <!-- Not needed at runtime: .lib link stubs, binaural-audio profiles, and lua scripts
-         (site-specific playlist parsers; IPTV playlists are parsed by CyrusIptv.Core).
+         (site-specific playlist parsers; IPTV playlists are parsed by ClassicWindowsIptvPlayer.Core).
          %2A is an escaped '*' so the wildcard expands against the LibVLC package folder. -->
     <VlcWindowsX64ExcludeFiles Include="libvlc.lib;libvlccore.lib;hrtfs\%2A%2A;lua\%2A%2A" />
   </ItemGroup>
   <ItemGroup>
-    <Resource Include="Assets\CyrusIptv.ico" />
+    <Resource Include="Assets\ClassicWindowsIptvPlayer.ico" />
     <Resource Include="Assets\iptv-logo.png" />
-    <ProjectReference Include="..\CyrusIptv.Core\CyrusIptv.Core.csproj" />
+    <ProjectReference Include="..\ClassicWindowsIptvPlayer.Core\ClassicWindowsIptvPlayer.Core.csproj" />
     <PackageReference Include="LibVLCSharp.WPF" Version="3.9.7.1" />
     <PackageReference Include="LibVLCSharp.WinForms" Version="3.9.7.1" />
     <PackageReference Include="VideoLAN.LibVLC.Windows" Version="3.0.23.1" />

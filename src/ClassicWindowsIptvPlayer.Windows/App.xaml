@@ -1,4 +1,4 @@
-<Application x:Class="CyrusIptv.Windows.App"
+<Application x:Class="ClassicWindowsIptvPlayer.Windows.App"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              Startup="OnStartup">
@@ -43,7 +43,7 @@
             <Setter Property="FontFamily" Value="Segoe UI" />
             <Setter Property="Background" Value="{DynamicResource Bg0Brush}" />
             <Setter Property="Foreground" Value="{DynamicResource Text0Brush}" />
-            <Setter Property="Icon" Value="Assets/CyrusIptv.ico" />
+            <Setter Property="Icon" Value="Assets/ClassicWindowsIptvPlayer.ico" />
         </Style>
 
         <Style TargetType="TextBlock">

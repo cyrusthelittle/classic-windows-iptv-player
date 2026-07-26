@@ -1,4 +1,4 @@
-﻿using CyrusIptv.Core;
+using ClassicWindowsIptvPlayer.Core;
 using LibVLCSharp.Shared;
 using System;
 using System.Collections.Generic;
@@ -19,7 +19,7 @@ using OpenFileDialog = Microsoft.Win32.OpenFileDialog;
 using Point = System.Windows.Point;
 using WpfMenuItem = System.Windows.Controls.MenuItem;
 
-namespace CyrusIptv.Windows;
+namespace ClassicWindowsIptvPlayer.Windows;
 
 public partial class MainWindow : Window
 {
@@ -2391,7 +2391,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private const string GitHubProjectUrl = "https://github.com/cyrusthelittle/cyrus-iptv";
+    private const string GitHubProjectUrl = "https://github.com/cyrusthelittle/classic-windows-iptv-player";
 
     private void About_Click(object sender, RoutedEventArgs e)
     {
@@ -2400,7 +2400,7 @@ public partial class MainWindow : Window
 
         MessageBox.Show(
             this,
-            $"Cyrus IPTV Modern\nVersion {versionText}",
+            $"Classic Windows IPTV Player\nVersion {versionText}",
             "About",
             MessageBoxButton.OK,
             MessageBoxImage.Information);

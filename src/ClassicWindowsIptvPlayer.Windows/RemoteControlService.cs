@@ -7,7 +7,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace CyrusIptv.Windows;
+namespace ClassicWindowsIptvPlayer.Windows;
 
 public sealed class RemoteControlService : IDisposable
 {
@@ -173,14 +173,14 @@ public sealed class RemoteControlService : IDisposable
 <html>
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Cyrus IPTV Remote</title>
+<title>Classic Windows IPTV Player Remote</title>
 <style>
 :root{color-scheme:dark}body{margin:0;background:#07111f;color:#f0f7ff;font-family:Segoe UI,Arial,sans-serif}.wrap{max-width:520px;margin:0 auto;padding:18px}h1{font-size:24px;margin:8px 0 2px}.hint{color:#9db3cc;margin:0 0 18px}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.wide{grid-column:span 3}.two{grid-column:span 2}button{height:72px;border:1px solid rgba(120,170,255,.25);border-radius:18px;background:rgba(37,72,116,.65);color:#fff;font-size:18px;font-weight:700;box-shadow:0 12px 28px rgba(0,0,0,.25)}button:active{transform:scale(.98);background:#2d81ff}.primary{background:#1976ff}.small{height:56px;font-size:15px}.footer{margin-top:16px;color:#8ea6c3;font-size:13px;line-height:1.45}
 </style>
 </head>
 <body>
 <div class="wrap">
-<h1>Cyrus IPTV Remote</h1>
+<h1>Classic Windows IPTV Player Remote</h1>
 <p class="hint">Use this from your phone or any device on the same network.</p>
 <div class="grid">
 <button onclick="cmd('up')">▲</button>
@@ -197,7 +197,7 @@ public sealed class RemoteControlService : IDisposable
 <button class="small" onclick="cmd('volume-up')">Vol +</button>
 <button class="wide small" onclick="cmd('mute')">Mute / Unmute</button>
 </div>
-<div class="footer">If the phone cannot connect, allow Cyrus IPTV Native through Windows Firewall for Private networks.</div>
+<div class="footer">If the phone cannot connect, allow Classic Windows IPTV Player through Windows Firewall for Private networks.</div>
 </div>
 <script>
 async function cmd(name){try{await fetch('/cmd?name='+encodeURIComponent(name),{cache:'no-store'});}catch(e){alert('Command failed: '+e.message);}}

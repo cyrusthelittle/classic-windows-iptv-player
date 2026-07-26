@@ -11,7 +11,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace CyrusIptv.Core;
+namespace ClassicWindowsIptvPlayer.Core;
 
 public sealed class PlaylistService
 {
@@ -30,12 +30,13 @@ public sealed class PlaylistService
         {
             Timeout = TimeSpan.FromSeconds(60)
         };
-        _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Cyrus-IPTV-Native/0.9.0");
+        _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Classic-Windows-IPTV-Player/0.9.0");
     }
 
     public async Task<IReadOnlyList<Channel>> LoadPlaylistAsync(AccountSettings account, CancellationToken cancellationToken)
     {
         var playlistUrl = BuildPlaylistUrl(account);
+        var xtreamAccount = TryResolveXtreamAccount(account);
         AppLogger.Info("Loading playlist from " + AppLogger.SanitizeUrl(playlistUrl));
 
         Exception m3uFailure;
@@ -45,13 +46,20 @@ public sealed class PlaylistService
             AppLogger.Info("Playlist HTTP response. status=" + (int)response.StatusCode + " " + response.ReasonPhrase);
             response.EnsureSuccessStatusCode();
 
-            var mediaKindByStreamId = await FetchXtreamMediaKindMapAsync(account, cancellationToken);
+            var mediaKindByStreamId = xtreamAccount is null
+                ? new Dictionary<string, MediaKind>(StringComparer.OrdinalIgnoreCase)
+                : await FetchXtreamMediaKindMapAsync(xtreamAccount, cancellationToken);
             AppLogger.Info("Xtream media kind map loaded. count=" + mediaKindByStreamId.Count);
 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
             var channels = await ParseM3uFromStreamAsync(stream, mediaKindByStreamId, cancellationToken);
             AppLogger.Info("Playlist parsed. channels=" + channels.Count);
-            if (channels.Count > 0) return await ReplaceSeriesWithApiPlaceholdersAsync(channels, account, cancellationToken);
+            if (channels.Count > 0)
+            {
+                return xtreamAccount is null
+                    ? channels
+                    : await ReplaceSeriesWithApiPlaceholdersAsync(channels, xtreamAccount, cancellationToken);
+            }
 
             m3uFailure = new InvalidOperationException("Playlist was downloaded but no playable channels were found.");
         }
@@ -66,11 +74,9 @@ public sealed class PlaylistService
         // list straight from the API instead of failing outright.
         AppLogger.Warn("M3U playlist unavailable, falling back to the Xtream API directly. " + m3uFailure.Message);
 
-        if (string.IsNullOrWhiteSpace(account.M3uUrl) &&
-            !string.IsNullOrWhiteSpace(account.Username) &&
-            !string.IsNullOrWhiteSpace(account.Password))
+        if (xtreamAccount is not null)
         {
-            var apiChannels = await BuildChannelsFromXtreamApiAsync(account, cancellationToken);
+            var apiChannels = await BuildChannelsFromXtreamApiAsync(xtreamAccount, cancellationToken);
             if (apiChannels.Count > 0)
             {
                 AppLogger.Info("Xtream API fallback succeeded. channels=" + apiChannels.Count);
@@ -196,8 +202,10 @@ public sealed class PlaylistService
     // for every series, since each call only covers one series's episodes.
     public async Task<IReadOnlyList<Channel>> FetchSeriesEpisodesAsync(AccountSettings account, string seriesId, CancellationToken cancellationToken)
     {
-        var apiUrl = BuildPlayerApiUrl(account);
-        var streamBaseUrl = BuildStreamBaseUrl(account);
+        var xtreamAccount = TryResolveXtreamAccount(account)
+            ?? throw new InvalidOperationException("Xtream credentials are required to load series episodes.");
+        var apiUrl = BuildPlayerApiUrl(xtreamAccount);
+        var streamBaseUrl = BuildStreamBaseUrl(xtreamAccount);
         var url = AddOrReplaceQuery(apiUrl, new Dictionary<string, string>
         {
             ["action"] = "get_series_info",
@@ -218,8 +226,8 @@ public sealed class PlaylistService
             return episodes;
         }
 
-        var username = Uri.EscapeDataString(account.Username.Trim());
-        var password = Uri.EscapeDataString(account.Password.Trim());
+        var username = Uri.EscapeDataString(xtreamAccount.Username.Trim());
+        var password = Uri.EscapeDataString(xtreamAccount.Password.Trim());
 
         foreach (var season in episodesElement.EnumerateObject())
         {
@@ -518,9 +526,10 @@ public sealed class PlaylistService
 
     public string BuildPlayerApiUrl(AccountSettings account)
     {
-        var serverUrl = (account.ServerUrl ?? string.Empty).Trim();
-        var username = (account.Username ?? string.Empty).Trim();
-        var password = (account.Password ?? string.Empty).Trim();
+        var xtreamAccount = TryResolveXtreamAccount(account) ?? account;
+        var serverUrl = (xtreamAccount.ServerUrl ?? string.Empty).Trim();
+        var username = (xtreamAccount.Username ?? string.Empty).Trim();
+        var password = (xtreamAccount.Password ?? string.Empty).Trim();
 
         if (string.IsNullOrWhiteSpace(serverUrl)) throw new InvalidOperationException("Server URL is required.");
         if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password)) throw new InvalidOperationException("Username and password are required to check account information.");
@@ -643,6 +652,58 @@ public sealed class PlaylistService
             ["type"] = "m3u_plus",
             ["output"] = "ts"
         });
+    }
+
+    private static AccountSettings? TryResolveXtreamAccount(AccountSettings account)
+    {
+        var serverUrl = (account.ServerUrl ?? string.Empty).Trim();
+        var username = (account.Username ?? string.Empty).Trim();
+        var password = (account.Password ?? string.Empty).Trim();
+
+        if (!string.IsNullOrWhiteSpace(serverUrl) &&
+            !string.IsNullOrWhiteSpace(username) &&
+            !string.IsNullOrWhiteSpace(password))
+        {
+            var resolved = account.Clone();
+            resolved.M3uUrl = string.Empty;
+            return resolved;
+        }
+
+        var m3uUrl = (account.M3uUrl ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(m3uUrl)) return null;
+        if (!m3uUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+            !m3uUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            m3uUrl = "http://" + m3uUrl;
+        }
+
+        if (!Uri.TryCreate(m3uUrl, UriKind.Absolute, out var uri) ||
+            !uri.AbsolutePath.EndsWith("/get.php", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var query = ParseQuery(uri.Query);
+        if (!query.TryGetValue("username", out username) || string.IsNullOrWhiteSpace(username) ||
+            !query.TryGetValue("password", out password) || string.IsNullOrWhiteSpace(password))
+        {
+            return null;
+        }
+
+        var serverBuilder = new UriBuilder(uri)
+        {
+            Query = string.Empty,
+            Fragment = string.Empty
+        };
+
+        return new AccountSettings
+        {
+            ServerUrl = serverBuilder.Uri.ToString(),
+            Username = username,
+            Password = password,
+            EpgUrl = account.EpgUrl,
+            PreferredPlayerPath = account.PreferredPlayerPath
+        };
     }
 
     private static async Task<List<Channel>> ParseM3uFromStreamAsync(

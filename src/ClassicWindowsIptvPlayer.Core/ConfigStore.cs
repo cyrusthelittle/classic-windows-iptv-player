@@ -4,7 +4,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Text.Json;
 
-namespace CyrusIptv.Core;
+namespace ClassicWindowsIptvPlayer.Core;
 
 public sealed class ConfigStore
 {
@@ -21,10 +21,43 @@ public sealed class ConfigStore
     public ConfigStore()
     {
         var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        _appFolder = Path.Combine(appData, "CyrusIptv");
+        _appFolder = Path.Combine(appData, "ClassicWindowsIptvPlayer");
+        MigrateLegacyData(appData, _appFolder);
         Directory.CreateDirectory(_appFolder);
         _statePath = Path.Combine(_appFolder, "state.json");
         _channelCachePath = Path.Combine(_appFolder, "channels.json.gz");
+    }
+
+    private static void MigrateLegacyData(string appData, string destination)
+    {
+        if (Directory.Exists(destination)) return;
+
+        var legacy = Path.Combine(appData, "CyrusIptv");
+        if (!Directory.Exists(legacy)) return;
+
+        try
+        {
+            Directory.Move(legacy, destination);
+        }
+        catch
+        {
+            // A locked cache should not prevent migration of the account state.
+            Directory.CreateDirectory(destination);
+            foreach (var sourceFile in Directory.GetFiles(legacy, "*", SearchOption.AllDirectories))
+            {
+                try
+                {
+                    var relativePath = Path.GetRelativePath(legacy, sourceFile);
+                    var destinationFile = Path.Combine(destination, relativePath);
+                    Directory.CreateDirectory(Path.GetDirectoryName(destinationFile)!);
+                    File.Copy(sourceFile, destinationFile, overwrite: false);
+                }
+                catch
+                {
+                    // Continue with the remaining state/cache files.
+                }
+            }
+        }
     }
 
     public AppState Load()

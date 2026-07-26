@@ -4,7 +4,7 @@ using System.Net;
 using System.Text.RegularExpressions;
 using System.Xml;
 
-namespace CyrusIptv.Core;
+namespace ClassicWindowsIptvPlayer.Core;
 
 public sealed record EpgProgramme(
     string ChannelId,
@@ -57,7 +57,7 @@ public sealed class EpgService
         {
             Timeout = TimeSpan.FromSeconds(90)
         };
-        _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Cyrus-IPTV-Native/0.9.0");
+        _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Classic-Windows-IPTV-Player/0.9.0");
     }
 
     public string? BuildEpgUrl(AccountSettings account)

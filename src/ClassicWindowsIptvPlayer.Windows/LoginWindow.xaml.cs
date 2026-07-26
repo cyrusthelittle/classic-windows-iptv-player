@@ -1,4 +1,4 @@
-using CyrusIptv.Core;
+using ClassicWindowsIptvPlayer.Core;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -7,7 +7,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using KeyEventArgs = System.Windows.Input.KeyEventArgs;
 
-namespace CyrusIptv.Windows;
+namespace ClassicWindowsIptvPlayer.Windows;
 
 public sealed class LoginResult
 {
