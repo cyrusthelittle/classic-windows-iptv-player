@@ -4,7 +4,7 @@ A classic Windows IPTV player built with WPF and LibVLC on a shared core library
 
 ## Download
 
-Grab the latest ready-to-run build from the [Releases page](../../releases/latest), download `Classic-Windows-IPTV-Player-Windows-x64.zip`, extract it anywhere, and run `Classic Windows IPTV Player.exe`.
+Grab the latest ready-to-run build from the [Releases page](../../releases/latest), download the `Classic-Windows-IPTV-Player-Windows-x64-v*.zip` asset, extract it anywhere, and run `Classic Windows IPTV Player.exe`.
 
 No installation is required. Keep the extracted folder together—the EXE needs `libvlc.dll`, `libvlccore.dll`, and the `plugins` folder next to it.
 
