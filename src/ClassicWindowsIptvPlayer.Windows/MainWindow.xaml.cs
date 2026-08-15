@@ -34,6 +34,7 @@ public partial class MainWindow : Window
     private readonly StreamProbeService _streamProbeService = new();
     private readonly RemoteControlService _remoteControlService = new();
     private readonly StreamInfoTracker _streamInfoTracker = new();
+    private readonly GitHubUpdateService _updateService = new();
     private readonly LibVLCSharp.WinForms.VideoView _videoView = new()
     {
         BackColor = System.Drawing.Color.Black,
@@ -82,6 +83,7 @@ public partial class MainWindow : Window
     private bool _suppressVolumeChange = true;
     private bool _suppressChannelSelectionChange;
     private bool _isChangingAccount;
+    private bool _isCheckingForUpdates;
     private DateTime? _livePauseStartedUtc;
     private DateTime _lastEpgUiUpdateUtc = DateTime.MinValue;
     private TimeSpan _liveBehind = TimeSpan.Zero;
@@ -123,6 +125,7 @@ public partial class MainWindow : Window
         InitializeVideoSurface();
         DarkModeMenuItem.IsChecked = _state.DarkMode;
         EpgEnabledMenuItem.IsChecked = _state.EpgEnabled;
+        UpdateChecksMenuItem.IsChecked = _state.CheckForUpdatesOnStartup;
         UpdateEpgEnabledUi();
         ApplyDefaultStartupFilters();
         InitializeButtonIcons();
@@ -157,6 +160,7 @@ public partial class MainWindow : Window
         };
 
         Loaded += MainWindow_Loaded;
+        ContentRendered += MainWindow_ContentRendered;
         Activated += (_, _) =>
         {
             if (_isFullScreen && !_isShuttingDown) ShowControls();
@@ -170,6 +174,15 @@ public partial class MainWindow : Window
             SaveCurrentAudioState();
             CleanupPlayer();
         };
+    }
+
+    private void MainWindow_ContentRendered(object? sender, EventArgs e)
+    {
+        ContentRendered -= MainWindow_ContentRendered;
+        if (_state.CheckForUpdatesOnStartup)
+        {
+            _ = CheckForUpdatesAsync(showUpToDateMessage: false);
+        }
     }
 
     private void ApplyDefaultStartupFilters()
@@ -1052,7 +1065,16 @@ public partial class MainWindow : Window
 
     private void ActivateSelectedListEntry()
     {
-        if (ChannelList.SelectedItem is not ChannelListEntry entry) return;
+        if (ChannelList.SelectedItem is not ChannelListEntry entry)
+        {
+            // A freshly opened channel list may not have a highlighted item yet.
+            // Make Select useful immediately by targeting the first visible entry.
+            if (_visibleEntries.Count == 0) return;
+            ChannelList.SelectedIndex = 0;
+            entry = _visibleEntries[0];
+            ChannelList.ScrollIntoView(entry);
+        }
+
         if (entry.IsFolder)
         {
             EnterFolder(entry.FolderName);
@@ -2411,6 +2433,107 @@ public partial class MainWindow : Window
         Process.Start(new ProcessStartInfo(GitHubProjectUrl) { UseShellExecute = true });
     }
 
+    private void ToggleUpdateChecks_Click(object sender, RoutedEventArgs e)
+    {
+        _state.CheckForUpdatesOnStartup = UpdateChecksMenuItem.IsChecked;
+        _store.Save(_state);
+        StatusText.Text = _state.CheckForUpdatesOnStartup
+            ? "Automatic update checks enabled."
+            : "Automatic update checks disabled.";
+    }
+
+    private async void CheckForUpdates_Click(object sender, RoutedEventArgs e)
+    {
+        await CheckForUpdatesAsync(showUpToDateMessage: true);
+    }
+
+    private async Task CheckForUpdatesAsync(bool showUpToDateMessage)
+    {
+        if (_isCheckingForUpdates)
+        {
+            if (showUpToDateMessage) StatusText.Text = "An update check is already in progress.";
+            return;
+        }
+
+        _isCheckingForUpdates = true;
+        CheckForUpdatesMenuItem.IsEnabled = false;
+        if (showUpToDateMessage) StatusText.Text = "Checking GitHub for updates...";
+
+        try
+        {
+            var release = await _updateService.GetAvailableUpdateAsync();
+            if (release is null)
+            {
+                if (showUpToDateMessage)
+                {
+                    StatusText.Text = "You are using the latest version.";
+                    MessageBox.Show(
+                        this,
+                        "You are using the latest version of Classic Windows IPTV Player.",
+                        "No updates available",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information);
+                }
+
+                return;
+            }
+
+            AppLogger.Info($"Update available. current={_updateService.CurrentVersion}; latest={release.DisplayVersion}");
+            var updateWindow = new UpdateWindow(_updateService.CurrentVersion, release) { Owner = this };
+            updateWindow.ShowDialog();
+
+            switch (updateWindow.PromptResult)
+            {
+                case UpdatePromptResult.NeverRemind:
+                    _state.CheckForUpdatesOnStartup = false;
+                    UpdateChecksMenuItem.IsChecked = false;
+                    _store.Save(_state);
+                    StatusText.Text = "Automatic update reminders disabled.";
+                    break;
+                case UpdatePromptResult.UpdateNow:
+                    try
+                    {
+                        Process.Start(new ProcessStartInfo(release.PageUri.AbsoluteUri) { UseShellExecute = true });
+                        StatusText.Text = "Opened the latest release on GitHub.";
+                    }
+                    catch (Exception ex)
+                    {
+                        AppLogger.Error("Could not open the GitHub release page.", ex);
+                        StatusText.Text = "Could not open the GitHub release page.";
+                        MessageBox.Show(
+                            this,
+                            "Windows could not open the release page. You can download the update manually from:\n\n" + release.PageUri.AbsoluteUri,
+                            "Could not open update",
+                            MessageBoxButton.OK,
+                            MessageBoxImage.Warning);
+                    }
+                    break;
+                default:
+                    StatusText.Text = "Update postponed until a later startup.";
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("GitHub update check failed.", ex);
+            if (showUpToDateMessage)
+            {
+                StatusText.Text = "Could not check for updates.";
+                MessageBox.Show(
+                    this,
+                    "The update check could not reach GitHub. Please check your internet connection and try again later.\n\n" + ex.Message,
+                    "Update check failed",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+            }
+        }
+        finally
+        {
+            _isCheckingForUpdates = false;
+            CheckForUpdatesMenuItem.IsEnabled = true;
+        }
+    }
+
     private async void ChangeAccount_Click(object sender, RoutedEventArgs e)
     {
         if (_isChangingAccount) return;
@@ -2668,7 +2791,7 @@ public partial class MainWindow : Window
         {
             if (_state.RemoteControlEnabled)
             {
-                _remoteControlService.Start(_state.RemoteControlPort, HandleRemoteCommand);
+                _remoteControlService.Start(_state.RemoteControlPort, HandleRemoteCommand, GetRemoteControlState);
                 var urls = string.Join("  |  ", RemoteControlService.GetLocalUrls(_state.RemoteControlPort));
                 if (showStatus) MessageBox.Show(this, "Remote control enabled:\n\n" + urls, "Remote Control", MessageBoxButton.OK, MessageBoxImage.Information);
                 StatusText.Text = "Remote control enabled: " + urls;
@@ -2692,8 +2815,25 @@ public partial class MainWindow : Window
     {
         Dispatcher.BeginInvoke(new Action(() =>
         {
+            if (command.StartsWith("search:", StringComparison.OrdinalIgnoreCase))
+            {
+                SearchBox.Text = command["search:".Length..];
+                SearchBox.CaretIndex = SearchBox.Text.Length;
+                return;
+            }
+
             switch (command)
             {
+                case "media-all": SetMediaKindMode(0); break;
+                case "media-live": SetMediaKindMode(1); break;
+                case "media-movies": SetMediaKindMode(2); break;
+                case "media-series": SetMediaKindMode(3); break;
+                case "view-all": SetViewMode(0); break;
+                case "view-favorites": SetViewMode(1); break;
+                case "view-recent": SetViewMode(2); break;
+                case "browse-folders": SetBrowseMode(0); break;
+                case "browse-letters": SetBrowseMode(1); break;
+                case "browse-items": SetBrowseMode(2); break;
                 case "playpause": TogglePlayPause(); break;
                 case "stop": StopPlayback(); break;
                 case "previous": PlayRelative(-1); break;
@@ -2709,12 +2849,24 @@ public partial class MainWindow : Window
                     ActivateSelectedListEntry();
                     break;
                 case "back":
-                    if (_isFullScreen) ToggleFullScreen();
-                    else if (!_channelsVisible) ToggleChannels_Click(this, new RoutedEventArgs());
-                    else if (_activeSeriesId is not null || _activeFolder is not null || _activeLetter is not null) FolderBack_Click(this, new RoutedEventArgs());
+                    // Remote Back belongs to browser navigation even while video is
+                    // fullscreen. The dedicated fullscreen command is the only remote
+                    // action that should leave fullscreen mode.
+                    if (_activeSeriesId is not null || _activeFolder is not null || _activeLetter is not null)
+                        FolderBack_Click(this, new RoutedEventArgs());
+                    else if (!_isFullScreen && !_channelsVisible)
+                        ToggleChannels_Click(this, new RoutedEventArgs());
                     break;
             }
         }));
+    }
+
+    private RemoteControlState GetRemoteControlState()
+    {
+        return new RemoteControlState(
+            Volatile.Read(ref _browseMode),
+            Volatile.Read(ref _mediaKindMode),
+            Volatile.Read(ref _viewMode));
     }
 
     private void MoveSelection(int delta)
@@ -2743,6 +2895,10 @@ public partial class MainWindow : Window
                 break;
             case Key.Space:
                 TogglePlayPause();
+                e.Handled = true;
+                break;
+            case Key.Enter:
+                ActivateSelectedListEntry();
                 e.Handled = true;
                 break;
             case Key.Left:

@@ -20,6 +20,10 @@ if errorlevel 1 (
   exit /b 1
 )
 
+if exist release\classic-windows-iptv-player\accounts.json del /f /q release\classic-windows-iptv-player\accounts.json
+if exist release\classic-windows-iptv-player\logs rmdir /s /q release\classic-windows-iptv-player\logs
+if exist release\classic-windows-iptv-player\cache rmdir /s /q release\classic-windows-iptv-player\cache
+
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\RepairWindowsLibVlc.ps1
 
 echo.

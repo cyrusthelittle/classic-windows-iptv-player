@@ -21,7 +21,7 @@ Windows SmartScreen may warn on first run because the app is unsigned. Click **M
 
 ## First-run account
 
-New installations include a credential-free **Free account** using the public [IPTV-org](https://github.com/iptv-org/iptv) country playlist. You can remove it or add your own Xtream or M3U account from the login window.
+New installations include two credential-free accounts: **Free account**, using the public [IPTV-org](https://github.com/iptv-org/iptv) country playlist, and **Free 2**, using the BestIPTV all-channels playlist. You can remove either account or add your own Xtream or M3U account from the login window.
 
 ## Projects
 
@@ -48,6 +48,9 @@ src/ClassicWindowsIptvPlayer.Windows   Windows WPF shell
 - stream information, source and buffer selection, seeking, volume, and mute
 - current and next programme display
 - local-network remote control
+- optional startup checks for new versions published on GitHub Releases
+
+When a newer release is available, the app offers **Remind me later**, **Never remind me**, and **Update now**. The last option opens the exact GitHub release so you can download the portable build. You can also run a manual check from **Help → Check for updates** or change automatic checks under **Settings → Check for updates on startup**.
 
 ## Build from source
 

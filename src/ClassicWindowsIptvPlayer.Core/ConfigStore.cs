@@ -21,45 +21,11 @@ public sealed class ConfigStore
 
     public ConfigStore()
     {
-        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
         var executableFolder = AppContext.BaseDirectory;
         _appFolder = Path.Combine(executableFolder, "cache");
         _statePath = Path.Combine(executableFolder, "accounts.json");
-        MigrateLegacyData(appData, _statePath, _appFolder);
         Directory.CreateDirectory(_appFolder);
         _channelCachePath = Path.Combine(_appFolder, "channels.json.gz");
-    }
-
-    private static void MigrateLegacyData(string appData, string statePath, string cacheFolder)
-    {
-        var sources = new[]
-        {
-            Path.Combine(appData, "ClassicWindowsIptvPlayer"),
-            Path.Combine(appData, "CyrusIptv")
-        };
-
-        Directory.CreateDirectory(cacheFolder);
-        foreach (var source in sources.Where(Directory.Exists))
-        {
-            try
-            {
-                var sourceState = Path.Combine(source, "state.json");
-                if (!File.Exists(statePath) && File.Exists(sourceState))
-                {
-                    File.Copy(sourceState, statePath);
-                }
-
-                foreach (var sourceCache in Directory.GetFiles(source, "channels*.json.gz", SearchOption.TopDirectoryOnly))
-                {
-                    var destinationCache = Path.Combine(cacheFolder, Path.GetFileName(sourceCache));
-                    if (!File.Exists(destinationCache)) File.Copy(sourceCache, destinationCache);
-                }
-            }
-            catch
-            {
-                // Continue with any other compatible data location.
-            }
-        }
     }
 
     public AppState Load()

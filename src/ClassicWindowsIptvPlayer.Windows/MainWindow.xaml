@@ -61,6 +61,7 @@
                     <Separator />
                     <MenuItem x:Name="DarkModeMenuItem" Header="Dark mode" IsCheckable="True" Click="ToggleDarkMode_Click" />
                     <MenuItem x:Name="EpgEnabledMenuItem" Header="Programme guide (EPG)" IsCheckable="True" Click="ToggleEpg_Click" />
+                    <MenuItem x:Name="UpdateChecksMenuItem" Header="Check for updates on startup" IsCheckable="True" Click="ToggleUpdateChecks_Click" />
                     <Separator />
                     <MenuItem Header="Remote control on/off" Click="ToggleRemoteControl_Click" />
                     <Separator />
@@ -75,6 +76,8 @@
                     </MenuItem>
             </MenuItem>
             <MenuItem Header="Help">
+                <MenuItem x:Name="CheckForUpdatesMenuItem" Header="Check for updates..." Click="CheckForUpdates_Click" />
+                <Separator />
                 <MenuItem Header="GitHub" Click="GitHub_Click" />
                 <MenuItem Header="About" Click="About_Click" />
             </MenuItem>

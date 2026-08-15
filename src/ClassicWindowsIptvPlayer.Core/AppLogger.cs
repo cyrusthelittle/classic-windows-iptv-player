@@ -23,33 +23,38 @@ public static class AppLogger
 
     private static string PreparePortableLogDirectory()
     {
-        var destination = Path.Combine(AppContext.BaseDirectory, "logs");
+        var logsRoot = Path.Combine(AppContext.BaseDirectory, "logs");
         try
         {
-            Directory.CreateDirectory(destination);
-            if (Directory.EnumerateFileSystemEntries(destination).Any()) return destination;
+            Directory.CreateDirectory(logsRoot);
 
-            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            CopyLogFiles(
-                Path.Combine(localAppData, "ClassicWindowsIptvPlayer"),
-                destination);
+            var freshDirectory = Path.Combine(
+                logsRoot,
+                $"session-{DateTime.UtcNow:yyyyMMddHHmmssfff}");
+
+            Directory.CreateDirectory(freshDirectory);
+
+            foreach (var staleDirectory in Directory.EnumerateDirectories(logsRoot, "session-*", SearchOption.TopDirectoryOnly))
+            {
+                if (string.Equals(staleDirectory, freshDirectory, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                try
+                {
+                    Directory.Delete(staleDirectory, true);
+                }
+                catch
+                {
+                    // Leave any in-use directories alone while we start fresh.
+                }
+            }
+
+            return freshDirectory;
         }
         catch
         {
             // Logging itself remains best-effort.
-        }
-
-        return destination;
-    }
-
-    private static void CopyLogFiles(string source, string destination)
-    {
-        if (!Directory.Exists(source)) return;
-
-        foreach (var sourceFile in Directory.GetFiles(source, "*.log", SearchOption.AllDirectories))
-        {
-            var destinationFile = Path.Combine(destination, Path.GetFileName(sourceFile));
-            if (!File.Exists(destinationFile)) File.Copy(sourceFile, destinationFile);
+            return logsRoot;
         }
     }
 

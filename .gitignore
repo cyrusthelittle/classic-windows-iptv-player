@@ -1,6 +1,9 @@
 bin/
 obj/
 release/
+release/**/accounts.json
+release/**/logs/
+release/**/logs/**
 .vs/
 *.user
 *.suo

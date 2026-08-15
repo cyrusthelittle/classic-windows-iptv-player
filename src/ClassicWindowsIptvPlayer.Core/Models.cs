@@ -99,6 +99,8 @@ public sealed class RecentItem
 
 public sealed class AppState
 {
+    private const string Free2PlaylistUrl = "https://bestiptv.hacks.tools/api/download?type=all&slug=index";
+
     public AccountSettings Account { get; set; } = new();
     public List<SavedAccount> Accounts { get; set; } = [];
     public string SelectedAccountId { get; set; } = string.Empty;
@@ -137,6 +139,14 @@ public sealed class AppState
 
     // EPG is opt-in because some providers expose very large or unreliable XMLTV feeds.
     public bool EpgEnabled { get; set; } = false;
+
+    // Update checks are enabled by default. Users can turn them off from the
+    // update prompt or Settings, while Help > Check for updates remains available.
+    public bool CheckForUpdatesOnStartup { get; set; } = true;
+
+    // Tracks one-time additions to the built-in account list. This lets existing
+    // installations receive new free accounts without restoring ones they remove.
+    public int BuiltInAccountsVersion { get; set; }
 
     public SavedAccount EnsureSelectedAccount()
     {
@@ -179,6 +189,23 @@ public sealed class AppState
                     M3uUrl = "https://iptv-org.github.io/iptv/index.country.m3u"
                 }
             });
+        }
+
+        if (BuiltInAccountsVersion < 1)
+        {
+            if (!Accounts.Any(account => string.Equals(
+                    account.Settings.M3uUrl,
+                    Free2PlaylistUrl,
+                    StringComparison.OrdinalIgnoreCase)))
+            {
+                Accounts.Add(new SavedAccount
+                {
+                    Name = "Free 2",
+                    Settings = new AccountSettings { M3uUrl = Free2PlaylistUrl }
+                });
+            }
+
+            BuiltInAccountsVersion = 1;
         }
 
         if (string.IsNullOrWhiteSpace(SelectedAccountId) ||

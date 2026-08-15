@@ -9,22 +9,26 @@ using System.Threading.Tasks;
 
 namespace ClassicWindowsIptvPlayer.Windows;
 
+public readonly record struct RemoteControlState(int BrowseMode, int MediaKindMode, int ViewMode);
+
 public sealed class RemoteControlService : IDisposable
 {
     private TcpListener? _listener;
     private CancellationTokenSource? _cts;
     private Action<string>? _commandHandler;
+    private Func<RemoteControlState>? _stateProvider;
     private Task? _listenTask;
 
     public bool IsRunning { get; private set; }
     public int Port { get; private set; }
 
-    public void Start(int port, Action<string> commandHandler)
+    public void Start(int port, Action<string> commandHandler, Func<RemoteControlState> stateProvider)
     {
         Stop();
 
         Port = Math.Max(1024, Math.Min(65535, port));
         _commandHandler = commandHandler;
+        _stateProvider = stateProvider;
         _cts = new CancellationTokenSource();
         _listener = new TcpListener(IPAddress.Any, Port);
         _listener.Start();
@@ -40,6 +44,8 @@ public sealed class RemoteControlService : IDisposable
         try { _listener?.Stop(); } catch { }
 
         _listener = null;
+        _commandHandler = null;
+        _stateProvider = null;
         _cts?.Dispose();
         _cts = null;
         _listenTask = null;
@@ -100,6 +106,14 @@ public sealed class RemoteControlService : IDisposable
                     return;
                 }
 
+                if (path.Equals("/state", StringComparison.OrdinalIgnoreCase))
+                {
+                    var state = _stateProvider?.Invoke() ?? new RemoteControlState(0, 0, 0);
+                    var json = $"{{\"browseMode\":{state.BrowseMode},\"mediaKindMode\":{state.MediaKindMode},\"viewMode\":{state.ViewMode}}}";
+                    await WriteResponseAsync(stream, json, "application/json", token).ConfigureAwait(false);
+                    return;
+                }
+
                 await WriteResponseAsync(stream, BuildRemotePage(), "text/html", token).ConfigureAwait(false);
             }
         }
@@ -114,15 +128,23 @@ public sealed class RemoteControlService : IDisposable
         var questionIndex = path.IndexOf('?', StringComparison.Ordinal);
         if (questionIndex >= 0)
         {
+            var command = string.Empty;
+            string? value = null;
             var query = path[(questionIndex + 1)..];
             foreach (var part in query.Split('&', StringSplitOptions.RemoveEmptyEntries))
             {
                 var kv = part.Split('=', 2);
-                if (kv.Length == 2 && kv[0].Equals("name", StringComparison.OrdinalIgnoreCase))
-                {
-                    return WebUtility.UrlDecode(kv[1]).Trim().ToLowerInvariant();
-                }
+                if (kv.Length != 2) continue;
+
+                var key = WebUtility.UrlDecode(kv[0]);
+                if (key.Equals("name", StringComparison.OrdinalIgnoreCase))
+                    command = WebUtility.UrlDecode(kv[1]).Trim().ToLowerInvariant();
+                else if (key.Equals("value", StringComparison.OrdinalIgnoreCase))
+                    value = WebUtility.UrlDecode(kv[1]);
             }
+
+            if (!string.IsNullOrWhiteSpace(command))
+                return command == "search" ? command + ":" + (value ?? string.Empty) : command;
         }
 
         var slashParts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
@@ -175,32 +197,56 @@ public sealed class RemoteControlService : IDisposable
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Classic Windows IPTV Player Remote</title>
 <style>
-:root{color-scheme:dark}body{margin:0;background:#07111f;color:#f0f7ff;font-family:Segoe UI,Arial,sans-serif}.wrap{max-width:520px;margin:0 auto;padding:18px}h1{font-size:24px;margin:8px 0 2px}.hint{color:#9db3cc;margin:0 0 18px}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.wide{grid-column:span 3}.two{grid-column:span 2}button{height:72px;border:1px solid rgba(120,170,255,.25);border-radius:18px;background:rgba(37,72,116,.65);color:#fff;font-size:18px;font-weight:700;box-shadow:0 12px 28px rgba(0,0,0,.25)}button:active{transform:scale(.98);background:#2d81ff}.primary{background:#1976ff}.small{height:56px;font-size:15px}.footer{margin-top:16px;color:#8ea6c3;font-size:13px;line-height:1.45}
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#07111f;color:#f0f7ff;font-family:Segoe UI,Arial,sans-serif}.wrap{max-width:520px;margin:0 auto;padding:18px}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.four{grid-template-columns:repeat(4,1fr)}.spacer{height:72px}.section-gap{margin-top:18px}button{height:72px;border:1px solid rgba(120,170,255,.25);border-radius:18px;background:rgba(37,72,116,.65);color:#fff;font-size:18px;font-weight:700;box-shadow:0 12px 28px rgba(0,0,0,.25)}button:active{transform:scale(.98);background:#2d81ff}.primary,.filters button.active{background:#1976ff;border-color:#7eb2ff;box-shadow:0 0 0 2px rgba(126,178,255,.22),0 12px 28px rgba(0,0,0,.25)}.filters{margin-bottom:10px}.filters button{height:48px;border-radius:13px;font-size:14px;box-shadow:none}.filters button.active{box-shadow:0 0 0 2px rgba(126,178,255,.22)}.search{width:100%;height:54px;margin-bottom:10px;padding:0 16px;border:1px solid rgba(120,170,255,.35);border-radius:15px;background:#101e31;color:#fff;font:inherit;font-size:17px;outline:none}.search:focus{border-color:#7eb2ff;box-shadow:0 0 0 2px rgba(126,178,255,.22)}
 </style>
 </head>
 <body>
 <div class="wrap">
-<h1>Classic Windows IPTV Player Remote</h1>
-<p class="hint">Use this from your phone or any device on the same network.</p>
-<div class="grid">
-<button onclick="cmd('up')">▲</button>
-<button class="primary" onclick="cmd('select')">OK / Play</button>
-<button onclick="cmd('back')">Back</button>
-<button onclick="cmd('previous')">⏮ Prev</button>
-<button onclick="cmd('playpause')">▶ / ⏸</button>
-<button onclick="cmd('next')">Next ⏭</button>
-<button onclick="cmd('down')">▼</button>
-<button onclick="cmd('stop')">⏹ Stop</button>
-<button onclick="cmd('fullscreen')">⛶ Full</button>
-<button class="small" onclick="cmd('channels')">Channels</button>
-<button class="small" onclick="cmd('volume-down')">Vol -</button>
-<button class="small" onclick="cmd('volume-up')">Vol +</button>
-<button class="wide small" onclick="cmd('mute')">Mute / Unmute</button>
+<input id="search" class="search" type="search" placeholder="Search channels and media" autocomplete="off" oninput="queueSearch(this.value)" />
+<div class="grid filters">
+<button data-group="browse" data-value="0" onclick="filter('browse',0,'browse-folders')">Folders</button>
+<button data-group="browse" data-value="1" onclick="filter('browse',1,'browse-letters')">A-Z</button>
+<button data-group="browse" data-value="2" onclick="filter('browse',2,'browse-items')">Items</button>
 </div>
-<div class="footer">If the phone cannot connect, allow Classic Windows IPTV Player through Windows Firewall for Private networks.</div>
+<div class="grid four filters">
+<button data-group="media" data-value="0" onclick="filter('media',0,'media-all')">All media</button>
+<button data-group="media" data-value="1" onclick="filter('media',1,'media-live')">Live TV</button>
+<button data-group="media" data-value="2" onclick="filter('media',2,'media-movies')">Movies</button>
+<button data-group="media" data-value="3" onclick="filter('media',3,'media-series')">Series</button>
+</div>
+<div class="grid filters">
+<button data-group="view" data-value="0" onclick="filter('view',0,'view-all')">All</button>
+<button data-group="view" data-value="1" onclick="filter('view',1,'view-favorites')">Favorites</button>
+<button data-group="view" data-value="2" onclick="filter('view',2,'view-recent')">Recent</button>
+</div>
+<div class="grid">
+<span class="spacer"></span>
+<button onclick="cmd('up')" aria-label="Move up">▲</button>
+<span class="spacer"></span>
+<button onclick="cmd('previous')">⏮ PREV</button>
+<button class="primary" onclick="cmd('select')" aria-label="Open highlighted item">OK</button>
+<button onclick="cmd('next')">NEXT ⏭</button>
+<button onclick="cmd('volume-down')">VOL −</button>
+<button onclick="cmd('down')" aria-label="Move down">▼</button>
+<button onclick="cmd('volume-up')">VOL +</button>
+</div>
+<div class="grid section-gap">
+<button onclick="cmd('back')">Back</button>
+<button onclick="cmd('playpause')">▶ / ⏸</button>
+<button onclick="cmd('channels')">Channels</button>
+<button onclick="cmd('stop')">⏹ Stop</button>
+<button onclick="cmd('mute')">Mute</button>
+<button onclick="cmd('fullscreen')">⛶ Full</button>
+</div>
 </div>
 <script>
-async function cmd(name){try{await fetch('/cmd?name='+encodeURIComponent(name),{cache:'no-store'});}catch(e){alert('Command failed: '+e.message);}}
+let searchTimer;
+function queueSearch(value){clearTimeout(searchTimer);searchTimer=setTimeout(()=>cmd('search',value),250);}
+function setActive(group,value){document.querySelectorAll('[data-group="'+group+'"]').forEach(button=>button.classList.toggle('active',Number(button.dataset.value)===value));}
+function filter(group,value,name){setActive(group,value);cmd(name);}
+async function syncState(){try{const response=await fetch('/state',{cache:'no-store'});if(!response.ok)return;const state=await response.json();setActive('browse',state.browseMode);setActive('media',state.mediaKindMode);setActive('view',state.viewMode);}catch(e){}}
+async function cmd(name,value){try{let url='/cmd?name='+encodeURIComponent(name);if(value!==undefined)url+='&value='+encodeURIComponent(value);await fetch(url,{cache:'no-store'});setTimeout(syncState,75);}catch(e){alert('Command failed: '+e.message);}}
+syncState();setInterval(syncState,750);
 </script>
 </body>
 </html>
