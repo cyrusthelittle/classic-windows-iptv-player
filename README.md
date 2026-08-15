@@ -21,7 +21,7 @@ Windows SmartScreen may warn on first run because the app is unsigned. Click **M
 
 ## First-run account
 
-New installations include two credential-free accounts: **Free account**, using the public [IPTV-org](https://github.com/iptv-org/iptv) country playlist, and **Free 2**, using the BestIPTV all-channels playlist. You can remove either account or add your own Xtream or M3U account from the login window.
+New installations include two credential-free accounts: **Free Account 1**, using the public [IPTV-org](https://github.com/iptv-org/iptv) country playlist, and **Free Account 2**, using the BestIPTV all-channels playlist. You can remove either account or add your own Xtream or M3U account from the login window.
 
 ## Projects
 

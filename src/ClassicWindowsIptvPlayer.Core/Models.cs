@@ -99,6 +99,7 @@ public sealed class RecentItem
 
 public sealed class AppState
 {
+    private const string Free1PlaylistUrl = "https://iptv-org.github.io/iptv/index.country.m3u";
     private const string Free2PlaylistUrl = "https://bestiptv.hacks.tools/api/download?type=all&slug=index";
 
     public AccountSettings Account { get; set; } = new();
@@ -183,10 +184,10 @@ public sealed class AppState
         {
             Accounts.Add(new SavedAccount
             {
-                Name = "Free account",
+                Name = "Free Account 1",
                 Settings = new AccountSettings
                 {
-                    M3uUrl = "https://iptv-org.github.io/iptv/index.country.m3u"
+                    M3uUrl = Free1PlaylistUrl
                 }
             });
         }
@@ -200,12 +201,31 @@ public sealed class AppState
             {
                 Accounts.Add(new SavedAccount
                 {
-                    Name = "Free 2",
+                    Name = "Free Account 2",
                     Settings = new AccountSettings { M3uUrl = Free2PlaylistUrl }
                 });
             }
 
             BuiltInAccountsVersion = 1;
+        }
+
+        if (BuiltInAccountsVersion < 2)
+        {
+            foreach (var account in Accounts)
+            {
+                if (string.Equals(account.Settings.M3uUrl, Free1PlaylistUrl, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(account.Name, "Free account", StringComparison.OrdinalIgnoreCase))
+                {
+                    account.Name = "Free Account 1";
+                }
+                else if (string.Equals(account.Settings.M3uUrl, Free2PlaylistUrl, StringComparison.OrdinalIgnoreCase) &&
+                         string.Equals(account.Name, "Free 2", StringComparison.OrdinalIgnoreCase))
+                {
+                    account.Name = "Free Account 2";
+                }
+            }
+
+            BuiltInAccountsVersion = 2;
         }
 
         if (string.IsNullOrWhiteSpace(SelectedAccountId) ||
