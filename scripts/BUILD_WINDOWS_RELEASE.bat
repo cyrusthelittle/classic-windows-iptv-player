@@ -20,7 +20,10 @@ if errorlevel 1 (
   exit /b 1
 )
 
-if exist release\classic-windows-iptv-player\accounts.json del /f /q release\classic-windows-iptv-player\accounts.json
+REM Ship the shared free-to-air accounts. Seeded from the tracked fixture, so a
+REM fresh build has working channels on first launch. Users can delete or replace
+REM accounts.json; the app recreates it on next sign-in.
+copy /y fixtures\accounts.json release\classic-windows-iptv-player\accounts.json >nul
 if exist release\classic-windows-iptv-player\logs rmdir /s /q release\classic-windows-iptv-player\logs
 if exist release\classic-windows-iptv-player\cache rmdir /s /q release\classic-windows-iptv-player\cache
 
