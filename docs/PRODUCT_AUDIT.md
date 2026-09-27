@@ -13,7 +13,7 @@ The recommended direction is a reliable Windows player with clear Live TV / Movi
 ## Scope and evidence
 
 - Reviewed the actual working tree, including pre-existing changes to `Models.cs`, the Windows project file, `MainWindow.xaml` and its code-behind. Those edits belong to the existing workspace and were preserved.
-- The Windows project reports version **7.0.0**; the core project has a separate version. Findings describe this working tree, not an assertion about every published build.
+- The Windows project reports version **0.7.0**; the core project has a separate version. Findings describe this working tree, not an assertion about every published build.
 - The initial Windows Debug build passed with **0 warnings and 0 errors**, using .NET SDK 10.0.301 and existing packages.
 - Core parser and failure cases were exercised using synthetic data and in-memory provider responses. No personal accounts, saved credential files or live provider subscriptions were used.
 - Competitor research uses official product sites, repositories and store listings checked on 20 September 2026. This is a feature/workflow comparison, not a hands-on speed, stability or popularity ranking.
