@@ -167,10 +167,9 @@ logs/                         Runtime and crash logs
 
 Keep `accounts.json` private because it may contain provider credentials. Playlist caches and logs may also contain provider or channel information. Moving the entire extracted folder moves the application and its saved data together.
 
-The only outbound
-connections it makes are the ones you ask for: fetching a playlist or programme
-guide from the provider you entered, and the optional GitHub release check under
-**Settings**.
+The only outbound connections it makes are the ones you ask for: fetching a
+playlist or programme guide from the provider you entered, and the optional
+GitHub release check under **Settings**.
 
 
 ## Build from source
