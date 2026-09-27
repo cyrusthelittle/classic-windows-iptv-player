@@ -1,0 +1,4 @@
+# accounts.json is an encrypted data file (CIPTV2 magic + one base64 blob).
+# Line-ending normalisation would risk mangling the payload, so treat it as
+# binary and store it byte-for-byte regardless of core.autocrlf.
+accounts.json -text
