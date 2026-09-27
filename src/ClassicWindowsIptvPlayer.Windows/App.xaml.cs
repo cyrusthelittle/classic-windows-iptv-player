@@ -19,7 +19,7 @@ public partial class App : WpfApplication
             AppLogger.Error("Dispatcher unhandled exception.", e.Exception);
             WriteRuntimeCrashLog(e.Exception);
             MessageBox.Show(
-                e.Exception.ToString(),
+                AppLogger.SanitizeException(e.Exception),
                 "Classic Windows IPTV Player error",
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
@@ -61,7 +61,10 @@ public partial class App : WpfApplication
 
         try
         {
-            ThemeManager.Apply(new ConfigStore().Load().DarkMode);
+            var startupStore = new ConfigStore();
+            ThemeManager.Apply(startupStore.Load().DarkMode);
+            if (startupStore.RecoveryNotice is { } notice)
+                MessageBox.Show(notice, "Saved data recovery", MessageBoxButton.OK, MessageBoxImage.Information);
 
             var loginWindow = new LoginWindow();
             var result = loginWindow.ShowDialog();
@@ -84,7 +87,7 @@ public partial class App : WpfApplication
             AppLogger.Error("Startup failed.", ex);
             WriteStartupCrashLog(ex);
             MessageBox.Show(
-                ex.ToString(),
+                AppLogger.SanitizeException(ex),
                 "Classic Windows IPTV Player startup error",
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
@@ -109,7 +112,7 @@ public partial class App : WpfApplication
             var dir = Path.GetDirectoryName(AppLogger.CurrentLogPath)
                 ?? Path.Combine(AppContext.BaseDirectory, "logs");
             Directory.CreateDirectory(dir);
-            File.WriteAllText(Path.Combine(dir, fileName), ex.ToString());
+            File.WriteAllText(Path.Combine(dir, fileName), AppLogger.SanitizeException(ex));
         }
         catch
         {

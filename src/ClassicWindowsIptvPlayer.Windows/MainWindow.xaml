@@ -4,7 +4,7 @@
         xmlns:wfi="clr-namespace:System.Windows.Forms.Integration;assembly=WindowsFormsIntegration"
         Title="Classic Windows IPTV Player"
         Width="1480" Height="900"
-        MinWidth="1040" MinHeight="680"
+        MinWidth="760" MinHeight="520"
         WindowStartupLocation="CenterScreen"
         WindowState="Maximized"
         Background="{DynamicResource Bg0Brush}"
@@ -20,17 +20,25 @@
         <Menu x:Name="AppMenu" Grid.Row="0" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource Text0Brush}">
             <MenuItem Header="Account">
                 <MenuItem Header="Information" Click="AccountInfo_Click" />
+                <MenuItem Header="Export organization (no credentials)..." Click="ExportOrganization_Click" />
+                <MenuItem Header="Import organization..." Click="ImportOrganization_Click" />
+                <MenuItem Header="Back up local data..." Click="BackupLocalData_Click" />
+                <MenuItem Header="Restore local data..." Click="RestoreLocalData_Click" />
+                <MenuItem Header="Restore hidden items..." Click="RestoreHiddenItems_Click" />
                 <Separator />
                 <MenuItem Header="Logout / Change account" Click="ChangeAccount_Click" />
             </MenuItem>
             <MenuItem Header="Playlist">
-                <MenuItem Header="Update playlist" Click="UpdatePlaylist_Click" />
+                <MenuItem Header="Retry provider / update playlist" Click="UpdatePlaylist_Click" />
+                <MenuItem Header="Use saved library" Click="UseSavedLibrary_Click" />
                 <MenuItem x:Name="RefreshEpgMenuItem" Header="Refresh programme guide" Click="RefreshEpg_Click" />
                 <MenuItem Header="Clear cache" Click="ClearCache_Click" />
             </MenuItem>
             <MenuItem Header="View">
                 <MenuItem Header="Show / hide channels   Ctrl+L" Click="ToggleChannels_Click" />
                 <MenuItem Header="Full screen   F11" Click="FullScreen_Click" />
+                <MenuItem Header="Mini player" Click="MiniPlayer_Click" />
+                <MenuItem Header="Show diagnostics" IsCheckable="True" Click="ToggleDiagnostics_Click" />
             </MenuItem>
             <MenuItem Header="Playback">
                 <MenuItem Header="Play / pause   Space" Click="PlayPause_Click" />
@@ -46,6 +54,7 @@
                 <MenuItem Header="Favorite / unfavorite selected" Click="ToggleFavorite_Click" />
             </MenuItem>
             <MenuItem x:Name="SubtitleMenu" Header="Subtitles" />
+            <MenuItem x:Name="PlaybackPreferencesMenu" Header="Playback" SubmenuOpened="PlaybackPreferencesMenu_Opened"><MenuItem Header="Available during playback" IsEnabled="False" /></MenuItem>
             <MenuItem Header="Settings">
                 <MenuItem Header="Buffer 1 sec" Click="Buffer1_Click" />
                 <MenuItem Header="Buffer 3 sec" Click="Buffer3_Click" />
@@ -62,8 +71,6 @@
                     <MenuItem x:Name="DarkModeMenuItem" Header="Dark mode" IsCheckable="True" Click="ToggleDarkMode_Click" />
                     <MenuItem x:Name="EpgEnabledMenuItem" Header="Programme guide (EPG)" IsCheckable="True" Click="ToggleEpg_Click" />
                     <MenuItem x:Name="UpdateChecksMenuItem" Header="Check for updates on startup" IsCheckable="True" Click="ToggleUpdateChecks_Click" />
-                    <Separator />
-                    <MenuItem Header="Remote control on/off" Click="ToggleRemoteControl_Click" />
                     <Separator />
                     <MenuItem Header="OSD opacity (controls + volume)">
                         <MenuItem Header="Enter percentage..." Click="SetCustomOsdOpacity_Click" />
@@ -85,7 +92,7 @@
 
         <Grid Grid.Row="1">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition x:Name="SidebarColumn" Width="440" MinWidth="320" />
+                <ColumnDefinition x:Name="SidebarColumn" Width="360" MinWidth="260" />
                 <ColumnDefinition x:Name="SplitterColumn" Width="5" />
                 <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
@@ -97,6 +104,7 @@
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
 
                     <Grid Margin="0,0,0,12">
@@ -111,9 +119,10 @@
                                        Width="32" Height="32"
                                        Margin="0,0,10,0"
                                        Stretch="Uniform" />
-                                <TextBlock Text="Channels" FontSize="22" FontWeight="Bold" VerticalAlignment="Center" />
+                                <TextBlock Text="Library" FontSize="22" FontWeight="Bold" VerticalAlignment="Center" />
                             </StackPanel>
                             <StackPanel Orientation="Horizontal" DockPanel.Dock="Right" HorizontalAlignment="Right">
+                                <Button x:Name="NewFavoriteFolderButton" Style="{StaticResource GhostButton}" Content="New folder" Visibility="Collapsed" Margin="0,0,10,0" Padding="10,5" Click="NewFavoriteFolder_Click" />
                                 <Button x:Name="FolderBackButton"
                                         Style="{StaticResource GhostButton}"
                                         Content="Back"
@@ -136,7 +145,14 @@
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
                         </Grid.RowDefinitions>
-                        <TextBox x:Name="SearchBox" Grid.Row="0" Height="38" Margin="0,0,0,8" TextChanged="SearchBox_TextChanged" />
+                        <StackPanel Grid.Row="0" Margin="0,0,0,8">
+                            <TextBlock Text="Search (Ctrl+F)" Foreground="{DynamicResource Text1Brush}" Margin="0,0,0,4" />
+                            <DockPanel LastChildFill="True">
+                                <Button x:Name="ClearSearchButton" DockPanel.Dock="Right" Style="{StaticResource GhostButton}" Content="Clear" Click="ClearSearch_Click" Margin="6,0,0,0" />
+                                <TextBox x:Name="SearchBox" Height="38" TextChanged="SearchBox_TextChanged" AutomationProperties.Name="Search current library" />
+                            </DockPanel>
+                            <TextBlock x:Name="SearchScopeText" Foreground="{DynamicResource Text2Brush}" FontSize="12" Margin="0,4,0,0" />
+                        </StackPanel>
                         <Grid Grid.Row="1">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
@@ -162,7 +178,7 @@
                                 <ColumnDefinition Width="6" />
                                 <ColumnDefinition Width="*" />
                             </Grid.ColumnDefinitions>
-                            <Button x:Name="AllMediaButton" Grid.Column="0" Style="{StaticResource GhostButton}" Content="All media" Click="AllMedia_Click" />
+                            <Button x:Name="AllMediaButton" Grid.Column="0" Style="{StaticResource GhostButton}" Content="All" Click="AllMedia_Click" />
                             <Button x:Name="LiveTvButton" Grid.Column="2" Style="{StaticResource GhostButton}" Content="Live TV" Click="LiveTv_Click" />
                             <Button x:Name="MoviesButton" Grid.Column="4" Style="{StaticResource GhostButton}" Content="Movies" Click="Movies_Click" />
                             <Button x:Name="SeriesButton" Grid.Column="6" Style="{StaticResource GhostButton}" Content="Series" Click="Series_Click" />
@@ -175,14 +191,36 @@
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="6" />
                                 <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="6" />
+                                <ColumnDefinition Width="*" />
                             </Grid.ColumnDefinitions>
                             <Button x:Name="AllViewButton" Grid.Column="0" Style="{StaticResource GhostButton}" Content="All" Click="AllView_Click" />
-                            <Button x:Name="FavoritesViewButton" Grid.Column="2" Style="{StaticResource GhostButton}" Content="Favorites" Click="FavoritesView_Click" />
+                            <Button x:Name="FavoritesViewButton" Grid.Column="2" Style="{StaticResource GhostButton}" Content="Favorites" ToolTip="Right-click a channel to add it to a favorite folder" Click="FavoritesView_Click" />
                             <Button x:Name="RecentViewButton" Grid.Column="4" Style="{StaticResource GhostButton}" Content="Recent" Click="RecentView_Click" />
+                            <Button x:Name="ContinueViewButton" Grid.Column="6" Style="{StaticResource GhostButton}" Content="Continue" ToolTip="Unfinished movies and episodes" Click="ContinueView_Click" />
                         </Grid>
+
+                        <ComboBox x:Name="SeasonPicker" Margin="0,8,0,0" Visibility="Collapsed"
+                                  SelectionChanged="SeasonPicker_SelectionChanged" AutomationProperties.Name="Series season" />
+                        <ComboBox x:Name="VodSortPicker" Margin="0,8,0,0" Visibility="Collapsed" SelectedIndex="0"
+                                  SelectionChanged="VodSortPicker_SelectionChanged" AutomationProperties.Name="Sort movies and series">
+                            <ComboBoxItem Content="Provider order" />
+                            <ComboBoxItem Content="Title A-Z" />
+                            <ComboBoxItem Content="Recently added" />
+                            <ComboBoxItem Content="Year (newest)" />
+                            <ComboBoxItem Content="Duration (longest)" />
+                        </ComboBox>
+                        <Button x:Name="VodDetailsButton" Margin="0,8,0,0" Visibility="Collapsed" Content="Selected item details"
+                                Style="{StaticResource GhostButton}" Click="VodDetails_Click" AutomationProperties.Name="Details for selected movie or series" />
+
+                        <DockPanel Margin="0,8,0,0" LastChildFill="True">
+                            <Button x:Name="ResetFiltersButton" DockPanel.Dock="Right" Style="{StaticResource GhostButton}" Content="Reset filters" Click="ResetFilters_Click" />
+                            <TextBlock x:Name="FilterScopeText" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Foreground="{DynamicResource Text2Brush}" AutomationProperties.LiveSetting="Polite" />
+                        </DockPanel>
                     </StackPanel>
 
-                    <ListBox x:Name="ChannelList" Grid.Row="3" SelectionChanged="ChannelList_SelectionChanged" MouseDoubleClick="ChannelList_MouseDoubleClick">
+                    <Grid Grid.Row="3">
+                    <ListBox x:Name="ChannelList" SelectionChanged="ChannelList_SelectionChanged" MouseDoubleClick="ChannelList_MouseDoubleClick" ContextMenuOpening="ChannelList_ContextMenuOpening" ScrollViewer.CanContentScroll="True" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling" AutomationProperties.Name="Library items">
                         <ListBox.ItemTemplate>
                             <DataTemplate>
                                 <Grid Margin="0,4">
@@ -225,12 +263,33 @@
                             </DataTemplate>
                         </ListBox.ItemTemplate>
                     </ListBox>
+                    <Border x:Name="EmptyStatePanel" Visibility="Collapsed" Background="{DynamicResource PanelBrush}" Padding="16" VerticalAlignment="Center" HorizontalAlignment="Stretch">
+                        <StackPanel>
+                            <TextBlock x:Name="EmptyStateText" TextWrapping="Wrap" Margin="0,0,0,10" />
+                            <Button x:Name="EmptyStateAction" Style="{StaticResource PrimaryButton}" Content="Reset filters" HorizontalAlignment="Left" Click="EmptyStateAction_Click" />
+                        </StackPanel>
+                    </Border>
+                    </Grid>
+                    <Border x:Name="BrowseGuidePanel" Grid.Row="4" Margin="0,8,0,0" Padding="8" Background="{DynamicResource Bg1Brush}" BorderBrush="{DynamicResource StrokeBrush}" BorderThickness="1" Visibility="Collapsed">
+                        <StackPanel>
+                            <TextBlock Text="SELECTED CHANNEL GUIDE" FontSize="10" FontWeight="Bold" Foreground="{DynamicResource Text2Brush}" />
+                            <TextBlock x:Name="BrowseGuideState" TextWrapping="Wrap" Margin="0,3,0,3" AutomationProperties.LiveSetting="Polite" />
+                            <Button x:Name="BrowseNowButton" Content="Now: —" Click="BrowseProgramme_Click" Style="{StaticResource GhostButton}" HorizontalContentAlignment="Left" Margin="0,2,0,0" />
+                            <Button x:Name="BrowseNextButton" Content="Next: —" Click="BrowseProgramme_Click" Style="{StaticResource GhostButton}" HorizontalContentAlignment="Left" Margin="0,2,0,0" />
+                            <WrapPanel Margin="0,5,0,0">
+                                <Button x:Name="GuideRefreshButton" Content="Refresh" Click="RefreshEpg_Click" Style="{StaticResource GhostButton}" Margin="0,0,5,0" />
+                                <Button x:Name="GuideCancelButton" Content="Cancel" Click="CancelEpg_Click" Style="{StaticResource GhostButton}" Margin="0,0,5,0" />
+                                <Button x:Name="GuideMapButton" Content="Map / time" Click="GuideMap_Click" Style="{StaticResource GhostButton}" />
+                                <Button x:Name="GuideGridButton" Content="Open guide grid" Click="GuideGrid_Click" Style="{StaticResource GhostButton}" Margin="5,0,0,0" />
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
                 </Grid>
             </Border>
 
             <GridSplitter x:Name="SidebarSplitter" Grid.Column="1" Width="5" HorizontalAlignment="Stretch" Background="{DynamicResource StrokeBrush}" />
 
-            <Grid x:Name="PlayerGrid" Grid.Column="2" Background="Black">
+            <Grid x:Name="PlayerGrid" Grid.Column="2" Background="Black" SizeChanged="PlayerGrid_SizeChanged">
                 <Grid.RowDefinitions>
                     <RowDefinition x:Name="VideoRow" Height="*" />
                     <RowDefinition x:Name="ControlsRow" Height="Auto" />
@@ -245,6 +304,7 @@
                             <MenuItem Header="Next" Click="Next_Click" />
                             <Separator />
                             <MenuItem Header="Full screen" Click="FullScreen_Click" />
+                            <MenuItem Header="Mini player" Click="MiniPlayer_Click" />
                             <MenuItem x:Name="VideoGoLiveMenuItem" Header="Go live" Click="GoLive_Click" IsEnabled="False" />
                             <MenuItem Header="Restart stream" Click="RestartStream_Click" />
                             <MenuItem Header="Copy stream URL" Click="CopyStreamUrl_Click" />
@@ -255,7 +315,7 @@
                             <MenuItem Header="Show stream information" Click="ShowStreamInfo_Click" />
                         </ContextMenu>
                     </Border.ContextMenu>
-                    <Grid>
+                    <Grid x:Name="MainVideoSurfacePanel">
                         <!-- The idle background must never be layered over a visible
                              video host: LibVLC renders into a native child window that
                              always paints on top of WPF content in the same area. The
@@ -312,7 +372,7 @@
                        AllowsTransparency="True"
                        StaysOpen="True" />
 
-                <Border x:Name="ControlsBar" Grid.Row="1" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource StrokeBrush}" BorderThickness="1,1,0,0" Padding="12" MouseEnter="ControlsBar_MouseEnter">
+                <Border x:Name="ControlsBar" Grid.Row="1" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource StrokeBrush}" BorderThickness="1,1,0,0" Padding="8" MouseEnter="ControlsBar_MouseEnter">
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
@@ -331,6 +391,21 @@
                                 <Button x:Name="PlayPauseButton" Style="{StaticResource PrimaryButton}" Width="54" Margin="8,0,0,0" ToolTip="Play or pause" Click="PlayPause_Click" />
                                 <Button x:Name="StopButton" Style="{StaticResource GhostButton}" Width="42" Margin="8,0,0,0" ToolTip="Stop" Click="Stop_Click" />
                                 <Button x:Name="NextButton" Style="{StaticResource GhostButton}" Width="42" Margin="8,0,0,0" ToolTip="Next channel" Click="Next_Click" />
+                                <Button x:Name="MorePlaybackButton" Style="{StaticResource GhostButton}" Content="More" Margin="8,0,0,0" Click="MorePlayback_Click" AutomationProperties.Name="More playback actions">
+                                    <Button.ContextMenu>
+                                        <ContextMenu Opened="MorePlaybackMenu_Opened">
+                                            <MenuItem x:Name="MorePlaybackPreferencesMenu" Header="Playback preferences" SubmenuOpened="PlaybackPreferencesMenu_Opened"><MenuItem Header="Available during playback" IsEnabled="False" /></MenuItem>
+                                            <MenuItem Header="Mini player" Click="MiniPlayer_Click" />
+                                            <MenuItem Header="Restart stream" Click="RestartStream_Click" />
+                                            <MenuItem Header="Previous channel" Click="Previous_Click" />
+                                            <MenuItem Header="Next channel" Click="Next_Click" />
+                                            <MenuItem Header="Favorite / unfavorite selected" Click="ToggleFavorite_Click" />
+                                            <MenuItem Header="Copy playing stream URL" Click="CopyStreamUrl_Click" />
+                                            <MenuItem Header="Stream information" Click="ShowStreamInfo_Click" />
+                                        </ContextMenu>
+                                    </Button.ContextMenu>
+                                </Button>
+                                <Button x:Name="RetryPlaybackButton" Style="{StaticResource PrimaryButton}" Content="Retry" Margin="8,0,0,0" Visibility="Collapsed" Click="RestartStream_Click" />
                             </StackPanel>
 
                             <StackPanel Orientation="Horizontal" DockPanel.Dock="Right" VerticalAlignment="Center">
@@ -343,7 +418,7 @@
                             <TextBlock x:Name="NowPlayingText" Text="Select a channel to play" VerticalAlignment="Center" HorizontalAlignment="Center" Foreground="{DynamicResource Text1Brush}" TextTrimming="CharacterEllipsis" />
                         </DockPanel>
 
-                        <Border x:Name="EpgPanel" Grid.Row="2" Margin="0,10,0,0" Padding="10,7" CornerRadius="5"
+                        <Border x:Name="EpgPanel" Grid.Row="2" Margin="0,6,0,0" Padding="8,5" CornerRadius="5"
                                 Background="{DynamicResource Bg1Brush}" BorderBrush="{DynamicResource StrokeBrush}" BorderThickness="1">
                             <Grid>
                                 <Grid.ColumnDefinitions>
@@ -362,7 +437,7 @@
                             </Grid>
                         </Border>
 
-                        <Grid Grid.Row="3" Margin="0,10,0,0">
+                        <Grid Grid.Row="3" Margin="0,6,0,0" Visibility="Collapsed">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="90" />
@@ -396,7 +471,7 @@
                                    Text="State: Not ready | Resolution: detecting | Bandwidth: detecting | FPS: detecting | Video codec: detecting | Audio codec: detecting | Audio: detecting"
                                    Margin="0,10,0,0"
                                    Foreground="{DynamicResource Text2Brush}"
-                                   TextWrapping="Wrap" />
+                                   TextWrapping="Wrap" Visibility="Collapsed" />
                     </Grid>
                 </Border>
             </Grid>
@@ -421,38 +496,13 @@
                     BorderBrush="{DynamicResource StrokeBrush}"
                     BorderThickness="1"
                     CornerRadius="24">
-                <Border.Effect>
-                    <DropShadowEffect BlurRadius="36"
-                                      ShadowDepth="10"
-                                      Opacity="0.16"
-                                      Color="#0F172A" />
-                </Border.Effect>
                 <StackPanel HorizontalAlignment="Center">
-                    <Grid Width="64" Height="64" HorizontalAlignment="Center">
-                        <Ellipse Stroke="#EDE9FE" StrokeThickness="7" />
-                        <Ellipse Stroke="#7C3AED"
-                                 StrokeThickness="7"
-                                 StrokeStartLineCap="Round"
-                                 StrokeEndLineCap="Round"
-                                 StrokeDashArray="2.2,5.8"
-                                 RenderTransformOrigin="0.5,0.5">
-                            <Ellipse.RenderTransform>
-                                <RotateTransform />
-                            </Ellipse.RenderTransform>
-                            <Ellipse.Triggers>
-                                <EventTrigger RoutedEvent="FrameworkElement.Loaded">
-                                    <BeginStoryboard>
-                                        <Storyboard RepeatBehavior="Forever">
-                                            <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)"
-                                                             From="0"
-                                                             To="360"
-                                                             Duration="0:0:1.1" />
-                                        </Storyboard>
-                                    </BeginStoryboard>
-                                </EventTrigger>
-                            </Ellipse.Triggers>
-                        </Ellipse>
-                    </Grid>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Height="14">
+                        <Ellipse x:Name="LoadingDot1" Width="10" Height="10" Margin="4,0" Fill="{DynamicResource AccentBrush}" />
+                        <Ellipse x:Name="LoadingDot2" Width="10" Height="10" Margin="4,0" Fill="{DynamicResource AccentBrush}" Opacity="0.25" />
+                        <Ellipse x:Name="LoadingDot3" Width="10" Height="10" Margin="4,0" Fill="{DynamicResource AccentBrush}" Opacity="0.25" />
+                        <Ellipse x:Name="LoadingDot4" Width="10" Height="10" Margin="4,0" Fill="{DynamicResource AccentBrush}" Opacity="0.25" />
+                    </StackPanel>
 
                     <TextBlock Text="Please wait"
                                Margin="0,24,0,0"
@@ -474,6 +524,11 @@
                                TextAlignment="Center"
                                FontSize="12"
                                Foreground="{DynamicResource Text2Brush}" />
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,22,0,0">
+                        <Button Content="Cancel" Click="CancelLibraryLoad_Click" Margin="0,0,8,0" Padding="12,6" />
+                        <Button Content="Retry" Click="RetryLibraryLoad_Click" Margin="0,0,8,0" Padding="12,6" />
+                        <Button Content="Use saved library" Click="UseSavedLibrary_Click" Padding="12,6" />
+                    </StackPanel>
                 </StackPanel>
             </Border>
         </Grid>

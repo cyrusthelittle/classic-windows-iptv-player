@@ -1,3 +1,4 @@
+using ClassicWindowsIptvPlayer.Core;
 using LibVLCSharp.Shared;
 using System;
 using System.Collections.Generic;
@@ -33,11 +34,12 @@ public sealed class StreamInfoTracker
                 $"State: {stateText}   |   Resolution: {resolutionText}   |   Bandwidth: {bandwidthText}   |   FPS: {fpsText}\n" +
                 $"Video codec: {videoCodecText}   |   Audio codec: {audioCodecText}   |   Audio: {audioFormatText}\n" +
                 $"Buffer: {bufferText}   |   Source: {sourceMode} / {sourceLabel}   |   Channel: {(string.IsNullOrWhiteSpace(channelName) ? "none" : channelName)}";
-            return new StreamInfoSnapshot(stateText, resolutionText, bandwidthText, fpsText, videoCodecText, audioCodecText, audioFormatText, bufferText, sourceLabel, fullText, shortText);
+            return new StreamInfoSnapshot(stateText, resolutionText, bandwidthText, fpsText, videoCodecText, audioCodecText, audioFormatText, bufferText,
+                AppLogger.SanitizeText(sourceLabel), AppLogger.SanitizeText(fullText), AppLogger.SanitizeText(shortText));
         }
         catch
         {
-            return new StreamInfoSnapshot("Unknown", "detecting", "detecting", "detecting", "detecting", "detecting", "detecting", $"{bufferMs:N0} ms", sourceLabel, "Stream information is not available yet.", "Stream info unavailable");
+            return new StreamInfoSnapshot("Unknown", "detecting", "detecting", "detecting", "detecting", "detecting", "detecting", $"{bufferMs:N0} ms", AppLogger.SanitizeText(sourceLabel), "Stream information is not available yet.", "Stream info unavailable");
         }
     }
 

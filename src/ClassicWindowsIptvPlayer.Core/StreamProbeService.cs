@@ -19,12 +19,11 @@ public sealed class StreamProbeService
 {
     private readonly HttpClient _httpClient;
 
-    public StreamProbeService()
+    public StreamProbeService() : this(new HttpClient { Timeout = TimeSpan.FromSeconds(12) }) { }
+
+    internal StreamProbeService(HttpClient httpClient)
     {
-        _httpClient = new HttpClient
-        {
-            Timeout = TimeSpan.FromSeconds(12)
-        };
+        _httpClient = httpClient;
         _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("VLC/3.0.20 LibVLC/3.0.20");
         _httpClient.DefaultRequestHeaders.Accept.ParseAdd("*/*");
     }
@@ -55,7 +54,7 @@ public sealed class StreamProbeService
 
             using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             var status = (int)response.StatusCode;
-            var contentType = response.Content.Headers.ContentType?.ToString() ?? string.Empty;
+            var contentType = AppLogger.SanitizeText(response.Content.Headers.ContentType?.ToString());
             var length = response.Content.Headers.ContentLength;
             var lengthText = length.HasValue ? $", {length.Value:N0} bytes" : string.Empty;
 
@@ -67,15 +66,15 @@ public sealed class StreamProbeService
 
             if (!response.IsSuccessStatusCode)
             {
-                return new StreamProbeResult(candidate, false, $"HTTP {status} {response.ReasonPhrase}", status, contentType);
+                return new StreamProbeResult(candidate, false, AppLogger.SanitizeText($"HTTP {status} {response.ReasonPhrase}"), status, contentType);
             }
 
             if (IsProbablyErrorPage(contentType))
             {
-                return new StreamProbeResult(candidate, false, $"HTTP {status}, but response looks like {contentType}{lengthText}", status, contentType);
+                return new StreamProbeResult(candidate, false, AppLogger.SanitizeText($"HTTP {status}, but response looks like {contentType}{lengthText}"), status, contentType);
             }
 
-            return new StreamProbeResult(candidate, true, $"HTTP {status} OK, {contentType}{lengthText}", status, contentType);
+            return new StreamProbeResult(candidate, true, AppLogger.SanitizeText($"HTTP {status} OK, {contentType}{lengthText}"), status, contentType);
         }
         catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -83,7 +82,7 @@ public sealed class StreamProbeService
         }
         catch (Exception ex)
         {
-            return new StreamProbeResult(candidate, false, ex.Message, null, string.Empty);
+            return new StreamProbeResult(candidate, false, AppLogger.SanitizeText(ex.Message), null, string.Empty);
         }
     }
 
@@ -97,19 +96,19 @@ public sealed class StreamProbeService
 
             using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             var status = (int)response.StatusCode;
-            var contentType = response.Content.Headers.ContentType?.ToString() ?? string.Empty;
+            var contentType = AppLogger.SanitizeText(response.Content.Headers.ContentType?.ToString());
 
             if (!response.IsSuccessStatusCode)
             {
-                return new StreamProbeResult(candidate, false, $"HTTP {status} {response.ReasonPhrase}", status, contentType);
+                return new StreamProbeResult(candidate, false, AppLogger.SanitizeText($"HTTP {status} {response.ReasonPhrase}"), status, contentType);
             }
 
             if (IsProbablyErrorPage(contentType))
             {
-                return new StreamProbeResult(candidate, false, $"HTTP {status}, but response looks like {contentType}", status, contentType);
+                return new StreamProbeResult(candidate, false, AppLogger.SanitizeText($"HTTP {status}, but response looks like {contentType}"), status, contentType);
             }
 
-            return new StreamProbeResult(candidate, true, $"HTTP {status} OK, {contentType}", status, contentType);
+            return new StreamProbeResult(candidate, true, AppLogger.SanitizeText($"HTTP {status} OK, {contentType}"), status, contentType);
         }
         catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -117,7 +116,7 @@ public sealed class StreamProbeService
         }
         catch (Exception ex)
         {
-            return new StreamProbeResult(candidate, false, ex.Message, null, string.Empty);
+            return new StreamProbeResult(candidate, false, AppLogger.SanitizeText(ex.Message), null, string.Empty);
         }
     }
 

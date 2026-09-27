@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace ClassicWindowsIptvPlayer.Core;
 
@@ -14,6 +15,9 @@ public static class AppLogger
     private static readonly string LogDirectory = PreparePortableLogDirectory();
 
     private static readonly string LogPath = Path.Combine(LogDirectory, "app.log");
+    private static readonly Regex UrlPattern = new(@"https?://[^\s<>""']+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex SecretAssignment = new(@"(?<![\w])(?<key>[\w%-]+)(?<separator>\s*(?:=|%3d|:\s+)\s*)(?<value>""[^""\r\n]*""|'[^'\r\n]*'|[^\s&;,<>""']+)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex XtreamPath = new(@"/(?:(?:live|movie|series)/)?[^/\s?#]+/[^/\s?#]+/\d+(?:\.[^/\s?#]+)?", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     public static string CurrentLogPath => LogPath;
 
@@ -61,8 +65,17 @@ public static class AppLogger
     public static string DescribeChannel(Channel? channel)
     {
         if (channel is null) return "none";
-        return $"id={channel.Id}; type={channel.MediaKind}; name={channel.Name}; group={channel.Group}; url={SanitizeUrl(channel.Url)}";
+        return SanitizeText($"id={channel.Id}; type={channel.MediaKind}; name={channel.Name}; group={channel.Group}; url={SanitizeUrl(channel.Url)}");
     }
+
+    public static string SanitizeText(string? value)
+    {
+        if (string.IsNullOrEmpty(value)) return string.Empty;
+        var text = UrlPattern.Replace(value, match => SanitizeUrl(match.Value));
+        return RedactLooseSecrets(text);
+    }
+
+    public static string SanitizeException(Exception exception) => SanitizeText(exception.ToString());
 
     public static string SanitizeUrl(string? value)
     {
@@ -87,7 +100,7 @@ public static class AppLogger
                 Path = RedactXtreamPath(uri.AbsolutePath)
             };
 
-            return builder.Uri.ToString();
+            return RedactLooseSecrets(builder.Uri.ToString());
         }
         catch
         {
@@ -109,8 +122,8 @@ public static class AppLogger
                 sb.Append(" [");
                 sb.Append(level);
                 sb.Append("] ");
-                sb.AppendLine(message);
-                if (exception is not null) sb.AppendLine(exception.ToString());
+                sb.AppendLine(SanitizeText(message));
+                if (exception is not null) sb.AppendLine(SanitizeException(exception));
 
                 File.AppendAllText(LogPath, sb.ToString());
             }
@@ -151,7 +164,7 @@ public static class AppLogger
 
     private static string RedactXtreamPath(string path)
     {
-        var segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries).ToList();
+        var segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries).Select(Uri.UnescapeDataString).ToList();
         var credentialIndex = FindCredentialSegmentIndex(segments);
         if (credentialIndex >= 0 && credentialIndex + 1 < segments.Count)
         {
@@ -195,9 +208,22 @@ public static class AppLogger
 
     private static string RedactLooseSecrets(string value)
     {
-        return value
-            .Replace("password=", "password=***", StringComparison.OrdinalIgnoreCase)
-            .Replace("username=", "username=***", StringComparison.OrdinalIgnoreCase)
-            .Replace("token=", "token=***", StringComparison.OrdinalIgnoreCase);
+        var text = XtreamPath.Replace(value, match =>
+        {
+            var path = match.Value;
+            var suffix = path.LastIndexOf('/');
+            var prefix = path[..suffix];
+            var password = prefix.LastIndexOf('/');
+            var user = prefix.LastIndexOf('/', password - 1);
+            return user < 0 ? path : path[..(user + 1)] + "***/***" + path[suffix..];
+        });
+        return SecretAssignment.Replace(text, match =>
+        {
+            if (!IsSecretKey(Uri.UnescapeDataString(match.Groups["key"].Value)))
+                return match.Groups["key"].Value + match.Groups["separator"].Value + RedactLooseSecrets(match.Groups["value"].Value);
+            var valueGroup = match.Groups["value"].Value;
+            var quote = valueGroup.Length > 1 && (valueGroup[0] == '\'' || valueGroup[0] == '"') ? valueGroup[0].ToString() : string.Empty;
+            return match.Groups["key"].Value + match.Groups["separator"].Value + quote + "***" + quote;
+        });
     }
 }

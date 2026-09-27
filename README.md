@@ -1,6 +1,8 @@
 # Classic Windows IPTV Player
 
-A portable IPTV player for Windows 10 and 11, built with WPF, .NET, LibVLC, and LibVLCSharp. Watch live TV, movies, and series from Xtream Codes accounts or M3U/M3U8 playlists, with XMLTV programme guide support, fast library browsing, favorites, subtitles, full-screen playback, automatic reconnects, and a phone-friendly local remote.
+A portable IPTV player for Windows 10 and 11, built with WPF, .NET, LibVLC, and LibVLCSharp. Watch live TV, movies, and series from Xtream Codes accounts or M3U/M3U8 playlists, with XMLTV programme guide support, fast library browsing, favorites, subtitles, full-screen playback, automatic reconnects.
+
+Development planning: [product, competitor and UI audit](docs/PRODUCT_AUDIT.md) | [prioritized build roadmap](ROADMAP.md).
 
 > Use only playlists and IPTV services that you are authorized to access. This application does not include paid channels or private provider credentials.
 
@@ -16,10 +18,9 @@ A portable IPTV player for Windows 10 and 11, built with WPF, .NET, LibVLC, and 
 - **Subtitles:** select embedded subtitle tracks or add local `.srt`, `.sub`, `.ass`, and `.ssa` files
 - **Playback diagnostics:** state, resolution, bandwidth, FPS, video/audio codecs, audio format, buffer, and current source URL
 - **Resilient streaming:** configurable 1/3/6/10-second network cache, 5/10/15/20 reconnect attempts, and stream restart
-- **Local-network remote:** control search, filters, navigation, playback, full screen, and volume from a phone or another browser
 - **Portable and self-contained:** no installer, .NET runtime, or separate VLC installation required
 - **Multiple saved accounts:** add, edit, remove, and switch providers without restarting the application; each account has its own compressed playlist cache
-- **Light and dark themes:** persistent theme, volume, mute, buffer, remote, EPG, and on-screen-display settings
+- **Light and dark themes:** persistent theme, volume, mute, buffer, EPG, and on-screen-display settings
 - **GitHub update checks:** optional startup checks, manual checks, and direct links to the exact release page
 
 ## Download and run
@@ -124,17 +125,6 @@ EPG is disabled by default because provider XMLTV feeds can be very large or unr
 
 The player matches XMLTV channel IDs and display names to playlist entries and displays the current and next programme for live channels. Hover the programme text for its category and description.
 
-## Phone and browser remote control
-
-1. Put the Windows PC and remote device on the same local network.
-2. Choose **Settings > Remote control on/off**.
-3. Open one of the displayed URLs on the phone or browser, normally `http://<computer-ip>:53177/`.
-4. If Windows asks, allow the app through the firewall on trusted private networks only.
-
-The responsive remote can search, switch folder/A-Z/item modes, filter live TV/movies/series and all/favorites/recent, move through the list, select or go back, change channels, play/pause, stop, show/hide channels, toggle full screen, adjust volume, and mute.
-
-Remote control listens on the local network without authentication while enabled. Use it only on a trusted network and turn it off when it is not needed.
-
 ## Keyboard and mouse shortcuts
 
 | Input | Action |
@@ -177,6 +167,12 @@ logs/                         Runtime and crash logs
 
 Keep `accounts.json` private because it may contain provider credentials. Playlist caches and logs may also contain provider or channel information. Moving the entire extracted folder moves the application and its saved data together.
 
+The only outbound
+connections it makes are the ones you ask for: fetching a playlist or programme
+guide from the provider you entered, and the optional GitHub release check under
+**Settings**.
+
+
 ## Build from source
 
 Requirements:
@@ -206,7 +202,7 @@ Project layout:
 
 ```text
 src/ClassicWindowsIptvPlayer.Core      Playlist, account, EPG, cache, search, and playback logic
-src/ClassicWindowsIptvPlayer.Windows   WPF interface, LibVLC player, remote, themes, and updates
+src/ClassicWindowsIptvPlayer.Windows   WPF interface, LibVLC player, themes, and updates
 scripts/                               Windows run, release, and LibVLC repair scripts
 ```
 

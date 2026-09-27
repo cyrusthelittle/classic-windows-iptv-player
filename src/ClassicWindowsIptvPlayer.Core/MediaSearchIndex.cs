@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 
 namespace ClassicWindowsIptvPlayer.Core;
 
@@ -19,21 +20,20 @@ public sealed class MediaSearchIndex
 
     public IReadOnlyList<Channel> Search(string query, MediaKind? kind, int limit = 500)
     {
-        query = (query ?? string.Empty).Trim().ToLowerInvariant();
+        return SearchAll(query, kind, CancellationToken.None).Take(Math.Max(50, limit)).ToList();
+    }
 
-        IEnumerable<(Channel Channel, string SearchText)> source = _items;
-        if (kind is not null)
+    // Enumerate the full match set for library filtering. The bounded Search API
+    // remains available for small previews, but must not drive the main list.
+    public IEnumerable<Channel> SearchAll(string query, MediaKind? kind, CancellationToken cancellationToken)
+    {
+        var parts = (query ?? string.Empty).Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        foreach (var item in _items)
         {
-            var mediaKind = kind.Value;
-            source = source.Where(item => item.Channel.MediaKind == mediaKind);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (kind is not null && item.Channel.MediaKind != kind.Value) continue;
+            if (parts.All(part => item.SearchText.Contains(part, StringComparison.OrdinalIgnoreCase)))
+                yield return item.Channel;
         }
-
-        if (!string.IsNullOrWhiteSpace(query))
-        {
-            var parts = query.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            source = source.Where(item => parts.All(part => item.SearchText.Contains(part, StringComparison.OrdinalIgnoreCase)));
-        }
-
-        return source.Take(Math.Max(50, limit)).Select(item => item.Channel).ToList();
     }
 }

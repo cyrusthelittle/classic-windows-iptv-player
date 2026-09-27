@@ -44,13 +44,6 @@ public sealed class ChannelTuner : IDisposable
     private const int DefaultMaxAttempts = 10;
     private const int MaxAttemptsCeiling = 30;
     private static readonly TimeSpan OpenTimeout = TimeSpan.FromSeconds(15);
-    // A stream that survived this long was healthy; if it dies afterwards the
-    // outage gets a fresh retry budget instead of inheriting old failures.
-    private static readonly TimeSpan HealthyPlayThreshold = TimeSpan.FromSeconds(30);
-    // Failed opens on this provider are instant refusals while the server spins
-    // the channel up on demand (~2s). Keep the cadence tight so playback starts
-    // the moment the stream becomes available, instead of backing off past it.
-    private static readonly int[] RetryDelaysMs = [250, 300, 400, 500];
 
     private readonly LibVLC _libVlc;
     private readonly object _gate = new();
@@ -142,7 +135,8 @@ public sealed class ChannelTuner : IDisposable
             catch (Exception ex)
             {
                 AppLogger.Error("Tuner: tune cycle crashed. generation=" + generation, ex);
-                RaiseState(new TunerStateSnapshot(TunerStatus.Failed, request, 0, MaxAttempts, ex.Message));
+                if (IsCurrent(generation))
+                    RaiseState(new TunerStateSnapshot(TunerStatus.Failed, request, 0, MaxAttempts, AppLogger.SanitizeText(ex.Message)));
             }
             finally
             {
@@ -166,7 +160,9 @@ public sealed class ChannelTuner : IDisposable
 
     public void Stop()
     {
+        if (_disposed) return;
         var generation = Interlocked.Increment(ref _generation);
+        _userPaused = false;
         AppLogger.Info("Tuner: stop requested. generation=" + generation);
         CancelAndDetachActivePlayer();
         RaiseState(new TunerStateSnapshot(TunerStatus.Idle, null, 0, MaxAttempts, null));
@@ -210,10 +206,11 @@ public sealed class ChannelTuner : IDisposable
     private async Task RunTuneCycleAsync(int generation, TuneRequest request, CancellationToken cancellationToken)
     {
         var maxAttempts = MaxAttempts;
-        var attempt = 0;
-        while (attempt < maxAttempts)
+        var retryBudget = new TunerRetryBudget(maxAttempts);
+        var vodPosition = new VodRecoveryPosition();
+        while (retryBudget.CanAttempt)
         {
-            attempt++;
+            var attempt = retryBudget.BeginAttempt();
             if (!IsCurrent(generation) || cancellationToken.IsCancellationRequested) return;
 
             RaiseState(new TunerStateSnapshot(TunerStatus.Tuning, request, attempt, maxAttempts, null));
@@ -239,7 +236,7 @@ public sealed class ChannelTuner : IDisposable
             catch (Exception ex)
             {
                 AppLogger.Error("Tuner: failed to create player/media. generation=" + generation, ex);
-                RaiseState(new TunerStateSnapshot(TunerStatus.Failed, request, attempt, maxAttempts, ex.Message));
+                RaiseState(new TunerStateSnapshot(TunerStatus.Failed, request, attempt, maxAttempts, AppLogger.SanitizeText(ex.Message)));
                 return;
             }
 
@@ -292,20 +289,22 @@ public sealed class ChannelTuner : IDisposable
                 return;
             }
 
+            TimeSpan? playedFor = null;
             if (opened)
             {
                 RaiseState(new TunerStateSnapshot(TunerStatus.Playing, request, attempt, maxAttempts, null));
                 AppLogger.Info("Tuner: playing. generation=" + generation + "; attempt=" + attempt + "; channel=" + request.ChannelName);
 
                 var playingSince = DateTime.UtcNow;
-                var end = await MonitorAsync(player, cancellationToken).ConfigureAwait(false);
+                var end = await MonitorAsync(player, cancellationToken,
+                    request.IsLive ? null : vodPosition).ConfigureAwait(false);
                 if (!IsCurrent(generation) || cancellationToken.IsCancellationRequested)
                 {
                     ReleaseAttempt(player, media);
                     return;
                 }
 
-                if (end == StreamEnd.EndedNormally && !request.IsLive)
+                if (PlaybackCompletionPolicy.IsNormalVodCompletion(request.IsLive, end == StreamEnd.EndedNormally))
                 {
                     AppLogger.Info("Tuner: media finished. generation=" + generation + "; channel=" + request.ChannelName);
                     RaiseState(new TunerStateSnapshot(TunerStatus.Ended, request, attempt, maxAttempts, null));
@@ -325,9 +324,9 @@ public sealed class ChannelTuner : IDisposable
                     return;
                 }
 
-                var playedFor = DateTime.UtcNow - playingSince;
-                AppLogger.Warn("Tuner: stream dropped after " + playedFor.TotalSeconds.ToString("F0") + "s. generation=" + generation + "; channel=" + request.ChannelName);
-                if (playedFor >= HealthyPlayThreshold) attempt = 0;
+                var duration = DateTime.UtcNow - playingSince;
+                playedFor = duration;
+                AppLogger.Warn("Tuner: stream dropped after " + duration.TotalSeconds.ToString("F0") + "s. generation=" + generation + "; channel=" + request.ChannelName);
             }
             else
             {
@@ -336,17 +335,9 @@ public sealed class ChannelTuner : IDisposable
 
             ReleaseAttempt(player, media);
 
-            if (attempt < maxAttempts)
+            if (retryBudget.NextDelayMs(playedFor) is int delay)
             {
-                var delay = RetryDelaysMs[Math.Min(attempt, RetryDelaysMs.Length) - 1];
-                try
-                {
-                    await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    return;
-                }
+                if (!await TunerRetryBudget.WaitForRetryAsync(delay, cancellationToken, () => IsCurrent(generation)).ConfigureAwait(false)) return;
             }
         }
 
@@ -413,7 +404,8 @@ public sealed class ChannelTuner : IDisposable
     /// a player always calls Stop first, so this completes for superseded
     /// players too and never leaks.
     /// </summary>
-    private static async Task<StreamEnd> MonitorAsync(MediaPlayer player, CancellationToken cancellationToken)
+    private static async Task<StreamEnd> MonitorAsync(MediaPlayer player, CancellationToken cancellationToken,
+        VodRecoveryPosition? vodPosition)
     {
         var outcome = new TaskCompletionSource<StreamEnd>(TaskCreationOptions.RunContinuationsAsynchronously);
         void OnError(object? s, EventArgs e) => outcome.TrySetResult(StreamEnd.Error);
@@ -426,6 +418,41 @@ public sealed class ChannelTuner : IDisposable
         using var cancellationRegistration = cancellationToken.Register(() => outcome.TrySetResult(StreamEnd.StoppedExternally));
         try
         {
+            var recoveryTarget = vodPosition?.RecoveryTargetMs;
+            var seekDeadline = DateTime.UtcNow.AddSeconds(4);
+            var awaitingSeekConfirmationMs = 0L;
+            while (!outcome.Task.IsCompleted)
+            {
+                if (recoveryTarget is > 0 && DateTime.UtcNow < seekDeadline)
+                {
+                    try
+                    {
+                        if (player.IsSeekable && player.Length > recoveryTarget)
+                        {
+                            player.Time = recoveryTarget.Value;
+                            awaitingSeekConfirmationMs = recoveryTarget.Value;
+                            recoveryTarget = null;
+                        }
+                    }
+                    catch { /* Metadata may not be ready yet. */ }
+                }
+
+                try
+                {
+                    if (vodPosition is not null && recoveryTarget is null)
+                    {
+                        var time = player.Time;
+                        if (awaitingSeekConfirmationMs == 0 || time >= awaitingSeekConfirmationMs - 1500)
+                        {
+                            awaitingSeekConfirmationMs = 0;
+                            vodPosition.Observe(time, player.Length);
+                        }
+                    }
+                }
+                catch { /* Native teardown can race a position sample. */ }
+
+                await Task.WhenAny(outcome.Task, Task.Delay(250, cancellationToken)).ConfigureAwait(false);
+            }
             return await outcome.Task.ConfigureAwait(false);
         }
         finally
@@ -473,7 +500,7 @@ public sealed class ChannelTuner : IDisposable
     private static void StopPlayer(MediaPlayer player)
     {
         try { player.Stop(); }
-        catch (Exception ex) { AppLogger.Warn("Tuner: player Stop failed. " + ex.Message); }
+        catch (Exception ex) { AppLogger.Warn("Tuner: player Stop failed. " + AppLogger.SanitizeText(ex.Message)); }
     }
 
     private void RaiseDetaching(MediaPlayer player)
@@ -512,7 +539,7 @@ public sealed class ChannelTuner : IDisposable
                 }
                 catch (Exception ex)
                 {
-                    AppLogger.Warn("Tuner: retired player Dispose failed. " + ex.Message);
+                    AppLogger.Warn("Tuner: retired player Dispose failed. " + AppLogger.SanitizeText(ex.Message));
                 }
 
                 try

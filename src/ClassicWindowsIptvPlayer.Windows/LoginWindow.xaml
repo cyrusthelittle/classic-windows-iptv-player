@@ -6,7 +6,6 @@
         MinWidth="720" MinHeight="600"
         WindowStartupLocation="CenterScreen"
         ResizeMode="CanResize"
-        PreviewKeyDown="Window_PreviewKeyDown"
         Loaded="Window_Loaded"
         Background="{StaticResource Bg0Brush}">
     <Grid Margin="28">
@@ -90,7 +89,7 @@
                         <TextBlock Text="Leave blank to use the Xtream provider's XMLTV guide automatically."
                                    Foreground="{StaticResource Text2Brush}" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,14" />
 
-                        <Button Style="{StaticResource GhostButton}" Content="Save Account" Height="36" Margin="0,0,0,14" Click="SaveAccount_Click" />
+                        <Button Style="{StaticResource GhostButton}" Content="Save Accounts" Height="36" Margin="0,0,0,14" Click="SaveAccount_Click" />
                         <CheckBox x:Name="UpdatePlaylistCheck" Content="Update playlist before opening" Foreground="{StaticResource Text1Brush}" IsChecked="True" />
                         <TextBlock x:Name="StatusText" Text="Use cached playlist for faster startup when you only want to watch." Foreground="{StaticResource Text2Brush}" TextWrapping="Wrap" Margin="0,14,0,0" />
                     </StackPanel>
@@ -104,7 +103,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <Button Grid.Column="1" Style="{StaticResource GhostButton}" Content="Cancel" Width="110" Margin="0,0,10,0" Click="Cancel_Click" />
-                    <Button Grid.Column="2" Style="{StaticResource PrimaryButton}" Content="Continue" Width="130" IsDefault="True" Click="Continue_Click" />
+                    <Button Grid.Column="2" Style="{StaticResource PrimaryButton}" Content="Open Account" Width="130" Click="Continue_Click" />
                 </Grid>
             </Grid>
         </Border>

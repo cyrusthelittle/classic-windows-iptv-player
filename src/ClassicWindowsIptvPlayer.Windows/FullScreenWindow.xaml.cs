@@ -22,6 +22,7 @@ public partial class FullScreenWindow : Window
     private readonly DispatcherTimer _hideTimer;
     private readonly DispatcherTimer _positionTimer;
     private bool _isSeeking;
+    private bool _updatingSeekSlider;
     private bool _closedCallbackSent;
 
     public FullScreenWindow(
@@ -49,7 +50,16 @@ public partial class FullScreenWindow : Window
         InitializeButtonIcons(muted);
 
         _hideTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
-        _hideTimer.Tick += (_, _) => { if (_mediaPlayer.IsPlaying) ControlsOverlay.Visibility = Visibility.Collapsed; };
+        _hideTimer.Tick += (_, _) =>
+        {
+            if (ControlsOverlay.IsMouseOver || ControlsOverlay.IsMouseCaptureWithin || ControlsOverlay.IsKeyboardFocusWithin ||
+                RootGrid.ContextMenu?.IsOpen == true)
+            {
+                _hideTimer.Stop();
+                _hideTimer.Start();
+            }
+            else if (_mediaPlayer.IsPlaying) ControlsOverlay.Visibility = Visibility.Collapsed;
+        };
         _positionTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(450) };
         _positionTimer.Tick += (_, _) => UpdatePosition();
 
@@ -99,13 +109,17 @@ public partial class FullScreenWindow : Window
         if (length > 0)
         {
             FullSeekSlider.IsEnabled = true;
-            FullSeekSlider.Value = Math.Max(0, Math.Min(1000, (double)time / length * 1000d));
+            _updatingSeekSlider = true;
+            try { FullSeekSlider.Value = Math.Max(0, Math.Min(1000, (double)time / length * 1000d)); }
+            finally { _updatingSeekSlider = false; }
             TimeText.Text = FormatTime(time) + " / " + FormatTime(length);
         }
         else
         {
             FullSeekSlider.IsEnabled = false;
-            FullSeekSlider.Value = 0;
+            _updatingSeekSlider = true;
+            try { FullSeekSlider.Value = 0; }
+            finally { _updatingSeekSlider = false; }
             TimeText.Text = _mediaPlayer.IsPlaying ? "Live" : "00:00 / 00:00";
         }
     }
@@ -131,14 +145,17 @@ public partial class FullScreenWindow : Window
     private void FullSeekSlider_PreviewMouseUp(object sender, MouseButtonEventArgs e)
     {
         _isSeeking = false;
-        if (_mediaPlayer.Length > 0) _mediaPlayer.Time = (long)(_mediaPlayer.Length * (FullSeekSlider.Value / 1000d));
+        if (_mediaPlayer.Length > 0) _mediaPlayer.Time = PlaybackSeekMath.TimeForSlider(_mediaPlayer.Length, FullSeekSlider.Value);
     }
 
     private void FullSeekSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
-        if (_isSeeking && _mediaPlayer.Length > 0)
+        if (!_updatingSeekSlider && _mediaPlayer.Length > 0)
         {
-            TimeText.Text = FormatTime((long)(_mediaPlayer.Length * (FullSeekSlider.Value / 1000d))) + " / " + FormatTime(_mediaPlayer.Length);
+            if (!_isSeeking && FullSeekSlider.IsKeyboardFocusWithin)
+                _mediaPlayer.Time = PlaybackSeekMath.TimeForSlider(_mediaPlayer.Length, FullSeekSlider.Value);
+            if (!_isSeeking && !FullSeekSlider.IsKeyboardFocusWithin) return;
+            TimeText.Text = FormatTime(PlaybackSeekMath.TimeForSlider(_mediaPlayer.Length, FullSeekSlider.Value)) + " / " + FormatTime(_mediaPlayer.Length);
         }
     }
 

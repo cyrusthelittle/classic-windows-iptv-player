@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/ClassicWindowsIptvPlayer.Core/ClassicWindowsIptvPlayer.Core.csproj" />
+    <Compile Include="../../src/ClassicWindowsIptvPlayer.Windows/TunerRetryBudget.cs" Link="TunerRetryBudget.cs" />
+    <Compile Include="../../src/ClassicWindowsIptvPlayer.Windows/PlaybackBrowseState.cs" Link="PlaybackBrowseState.cs" />
+    <Compile Include="../../src/ClassicWindowsIptvPlayer.Windows/VodRecoveryPosition.cs" Link="VodRecoveryPosition.cs" />
+    <Compile Include="../../src/ClassicWindowsIptvPlayer.Windows/LibraryNavigationPolicy.cs" Link="LibraryNavigationPolicy.cs" />
+    <Compile Include="../../src/ClassicWindowsIptvPlayer.Windows/LazyList.cs" Link="LazyList.cs" />
+    <Compile Include="../../src/ClassicWindowsIptvPlayer.Windows/GuideSearchRows.cs" Link="GuideSearchRows.cs" />
+    <Compile Include="../../src/ClassicWindowsIptvPlayer.Windows/VideoHostOwnershipPolicy.cs" Link="VideoHostOwnershipPolicy.cs" />
+  </ItemGroup>
+</Project>

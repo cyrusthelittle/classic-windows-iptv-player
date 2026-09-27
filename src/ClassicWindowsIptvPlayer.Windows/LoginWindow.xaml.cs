@@ -4,8 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Input;
-using KeyEventArgs = System.Windows.Input.KeyEventArgs;
+using MessageBox = System.Windows.MessageBox;
 
 namespace ClassicWindowsIptvPlayer.Windows;
 
@@ -20,7 +19,9 @@ public partial class LoginWindow : Window
 {
     private readonly ConfigStore _store = new();
     private readonly AppState _state;
+    private AccountEditingSession _session;
     private bool _loadingAccount;
+    public string? PlayingAccountId { get; init; }
 
     public LoginResult LoginResult { get; private set; } = new() { Account = new AccountSettings(), AccountId = string.Empty, UpdatePlaylist = true };
 
@@ -28,33 +29,32 @@ public partial class LoginWindow : Window
     {
         InitializeComponent();
         _state = _store.Load();
-        _state.EnsureAccounts();
+        _session = new AccountEditingSession(_state);
         AppLogger.Info("Login window opened. accounts=" + _state.Accounts.Count + "; selectedAccountId=" + _state.SelectedAccountId);
         RefreshAccountsList();
-        SelectAccount(_state.SelectedAccountId);
+        SelectAccount(_session.SelectedId);
+        if (_store.RecoveryNotice is { } notice)
+            MessageBox.Show(this, notice, "Saved data recovery", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     private void Continue_Click(object sender, RoutedEventArgs e)
     {
-        var selected = SaveSelectedAccount();
-        if (selected is null) return;
+        CaptureFields();
+        var requestedUpdate = UpdatePlaylistCheck.IsChecked == true;
+        if (!CommitDrafts()) return;
 
-        if (string.IsNullOrWhiteSpace(selected.Settings.ServerUrl) &&
-            string.IsNullOrWhiteSpace(selected.Settings.M3uUrl))
-        {
-            StatusText.Text = "Enter a server URL or an M3U playlist link.";
-            return;
-        }
-
+        var selected = _session.Selected;
         var hasCache = _store.HasChannelCacheForAccount(selected.Id);
         var mustUpdate = selected.LastPlaylistUpdatedUtc is null || !hasCache;
+        _state.SelectedAccountId = selected.Id;
+        _state.Account = selected.Settings.Clone();
         _store.Save(_state);
 
         LoginResult = new LoginResult
         {
             Account = selected.Settings.Clone(),
             AccountId = selected.Id,
-            UpdatePlaylist = mustUpdate || UpdatePlaylistCheck.IsChecked == true
+            UpdatePlaylist = mustUpdate || requestedUpdate
         };
         AppLogger.Info("Login continue. accountId=" + selected.Id + "; updatePlaylist=" + LoginResult.UpdatePlaylist + "; hasCache=" + hasCache);
         DialogResult = true;
@@ -62,90 +62,114 @@ public partial class LoginWindow : Window
 
     private void Cancel_Click(object sender, RoutedEventArgs e)
     {
-        AppLogger.Info("Login cancelled.");
+        AppLogger.Info("Login cancelled. Uncommitted account edits discarded.");
         DialogResult = false;
     }
 
     private void AccountsList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_loadingAccount) return;
-        if (AccountsList.SelectedItem is not AccountListItem item) return;
-        _state.SelectedAccountId = item.Id;
-        _state.Account = _state.EnsureSelectedAccount().Settings.Clone();
-        _store.Save(_state);
+        if (_loadingAccount || AccountsList.SelectedItem is not AccountListItem item) return;
+        CaptureFields();
+        _session.Select(item.Id);
         LoadSelectedAccountIntoFields();
     }
 
     private void AddAccount_Click(object sender, RoutedEventArgs e)
     {
-        var account = _state.AddAccount();
-        _store.Save(_state);
+        CaptureFields();
+        var account = _session.Add();
         RefreshAccountsList();
         SelectAccount(account.Id);
-        AppLogger.Info("Account added. accountId=" + account.Id);
-        StatusText.Text = "New account added. Enter its details, then save or continue.";
+        StatusText.Text = "New account is a draft. Enter its details, then Save or Continue.";
     }
 
     private void RemoveAccount_Click(object sender, RoutedEventArgs e)
     {
-        if (AccountsList.SelectedItem is not AccountListItem item) return;
-        if (_state.Accounts.Count <= 1)
+        if (_session.Accounts.Count <= 1)
         {
             StatusText.Text = "At least one account is required.";
             return;
         }
-
-        _state.RemoveAccount(item.Id);
-        _store.ClearChannelCache(item.Id);
-        _store.Save(_state);
-        AppLogger.Info("Account removed. accountId=" + item.Id);
+        var account = _session.Selected;
+        if (string.Equals(account.Id, PlayingAccountId, StringComparison.OrdinalIgnoreCase))
+        {
+            StatusText.Text = "Open another account before removing the account currently playing.";
+            return;
+        }
+        var answer = MessageBox.Show(this,
+            $"Remove '{account.DisplayName}' and its saved playlist cache when you Save or Continue?",
+            "Remove account", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No);
+        if (answer != MessageBoxResult.Yes) return;
+        _session.RemoveSelected();
         RefreshAccountsList();
-        SelectAccount(_state.SelectedAccountId);
-        StatusText.Text = "Account removed.";
+        SelectAccount(_session.SelectedId);
+        StatusText.Text = "Removal is pending. Save or Continue to apply it; Cancel discards it.";
     }
 
     private void SaveAccount_Click(object sender, RoutedEventArgs e)
     {
-        var account = SaveSelectedAccount();
-        if (account is null) return;
-        RefreshAccountsList();
-        SelectAccount(account.Id);
-        AppLogger.Info("Account saved. accountId=" + account.Id);
-        StatusText.Text = "Account saved.";
+        CaptureFields();
+        if (!CommitDrafts()) return;
+        StatusText.Text = "Accounts saved. Cancel closes this window without opening another account.";
     }
 
-    private SavedAccount? SaveSelectedAccount()
+    private bool CommitDrafts()
     {
-        if (_loadingAccount) return _state.EnsureSelectedAccount();
-        var selected = _state.EnsureSelectedAccount();
+        var issue = _session.Validate();
+        if (issue is not null)
+        {
+            SelectAccount(issue.AccountId);
+            StatusText.Text = issue.Message + " No changes were saved.";
+            FocusInvalidField(issue.Field);
+            return false;
+        }
+
+        var selectedId = _session.SelectedId;
+        var removedIds = _session.ApplyTo(_state);
+        _store.Save(_state);
+        foreach (var id in removedIds) _store.ClearChannelCache(id);
+        _session = new AccountEditingSession(_state);
+        _session.Select(selectedId);
+        RefreshAccountsList();
+        SelectAccount(selectedId);
+        AppLogger.Info("Account drafts saved. accounts=" + _state.Accounts.Count + "; removed=" + removedIds.Count);
+        return true;
+    }
+
+    private void CaptureFields()
+    {
+        if (_loadingAccount || AccountTypeBox.SelectedIndex < 0) return;
+        var previous = _session.Selected.Settings;
         var useM3u = AccountTypeBox.SelectedIndex == 1;
-        var settings = new AccountSettings
+        _session.EditSelected(AccountNameBox.Text, new AccountSettings
         {
             ServerUrl = useM3u ? string.Empty : ServerUrlBox.Text.Trim(),
             M3uUrl = useM3u ? M3uUrlBox.Text.Trim() : string.Empty,
             Username = useM3u ? string.Empty : UsernameBox.Text.Trim(),
             Password = useM3u ? string.Empty : PasswordBox.Password.Trim(),
             EpgUrl = EpgUrlBox.Text.Trim(),
-            PreferredPlayerPath = selected.Settings.PreferredPlayerPath
-        };
+            PreferredPlayerPath = previous.PreferredPlayerPath
+        });
+    }
 
-        selected = _state.UpsertSelectedAccount(AccountNameBox.Text, settings);
-        _store.Save(_state);
-        return selected;
+    private void FocusInvalidField(string field)
+    {
+        switch (field)
+        {
+            case "AccountName": AccountNameBox.Focus(); break;
+            case "ServerUrl": ServerUrlBox.Focus(); break;
+            case "M3uUrl": M3uUrlBox.Focus(); break;
+            case "Username": UsernameBox.Focus(); break;
+            case "Password": PasswordBox.Focus(); break;
+            case "EpgUrl": EpgUrlBox.Focus(); break;
+        }
     }
 
     private void RefreshAccountsList()
     {
         _loadingAccount = true;
-        try
-        {
-            var items = _state.Accounts.Select(AccountListItem.FromAccount).ToList();
-            AccountsList.ItemsSource = items;
-        }
-        finally
-        {
-            _loadingAccount = false;
-        }
+        try { AccountsList.ItemsSource = _session.Accounts.Select(AccountListItem.FromAccount).ToList(); }
+        finally { _loadingAccount = false; }
     }
 
     private void SelectAccount(string accountId)
@@ -153,20 +177,17 @@ public partial class LoginWindow : Window
         _loadingAccount = true;
         try
         {
+            _session.Select(accountId);
             var items = AccountsList.ItemsSource as IReadOnlyList<AccountListItem>;
             AccountsList.SelectedItem = items?.FirstOrDefault(i => string.Equals(i.Id, accountId, StringComparison.OrdinalIgnoreCase));
+            LoadSelectedAccountIntoFields();
         }
-        finally
-        {
-            _loadingAccount = false;
-        }
-
-        LoadSelectedAccountIntoFields();
+        finally { _loadingAccount = false; }
     }
 
     private void LoadSelectedAccountIntoFields()
     {
-        var account = _state.EnsureSelectedAccount();
+        var account = _session.Selected;
         AccountNameBox.Text = account.Name;
         ServerUrlBox.Text = account.Settings.ServerUrl;
         M3uUrlBox.Text = account.Settings.M3uUrl;
@@ -181,20 +202,11 @@ public partial class LoginWindow : Window
         UpdatePlaylistCheck.IsChecked = mustUpdate;
         UpdatePlaylistCheck.IsEnabled = !mustUpdate;
         StatusText.Text = mustUpdate
-            ? "This account has no updated playlist yet. It will update before opening."
-            : $"Last playlist update: {FormatUpdatedAt(account.LastPlaylistUpdatedUtc)}. You can uncheck update for a faster login.";
+            ? "No saved playlist is available. Opening this account will update it."
+            : $"Last playlist update: {account.LastPlaylistUpdatedUtc!.Value.ToLocalTime():g}. Save commits edits; Cancel discards pending edits.";
     }
 
-    private static string FormatUpdatedAt(DateTime? updatedUtc)
-    {
-        if (updatedUtc is null) return "Never";
-        return updatedUtc.Value.ToLocalTime().ToString("g");
-    }
-
-    private void AccountTypeBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        UpdateAccountTypeFields();
-    }
+    private void AccountTypeBox_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateAccountTypeFields();
 
     private void UpdateAccountTypeFields()
     {
@@ -204,17 +216,7 @@ public partial class LoginWindow : Window
         M3uFieldsPanel.Visibility = useM3u ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    private void Window_Loaded(object sender, RoutedEventArgs e)
-    {
-        AccountsList.Focus();
-    }
-
-    private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
-    {
-        if (e.Key != Key.Enter || Keyboard.Modifiers != ModifierKeys.None) return;
-        e.Handled = true;
-        Continue_Click(this, new RoutedEventArgs());
-    }
+    private void Window_Loaded(object sender, RoutedEventArgs e) => AccountsList.Focus();
 
     private sealed record AccountListItem(string Id, string Text)
     {

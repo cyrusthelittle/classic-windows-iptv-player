@@ -15,6 +15,7 @@ namespace ClassicWindowsIptvPlayer.Core;
 
 public sealed class PlaylistService
 {
+    public sealed record LoadResult(IReadOnlyList<Channel> Channels, bool IsPartial, string Message);
     private static readonly Regex AttributeRegex = new("(?<key>[A-Za-z0-9_-]+)=\\\"(?<value>[^\\\"]*)\\\"", RegexOptions.Compiled);
     private static readonly Regex WordSplitRegex = new("[^a-z0-9]+", RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private static readonly Regex SeriesEpisodeRegex = new(
@@ -24,17 +25,21 @@ public sealed class PlaylistService
 
     private readonly HttpClient _httpClient;
 
-    public PlaylistService()
+    public PlaylistService(HttpClient? httpClient = null)
     {
-        _httpClient = new HttpClient
-        {
-            Timeout = TimeSpan.FromSeconds(60)
-        };
+        _httpClient = httpClient ?? new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
         _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Classic-Windows-IPTV-Player/0.9.0");
     }
 
-    public async Task<IReadOnlyList<Channel>> LoadPlaylistAsync(AccountSettings account, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<Channel>> LoadPlaylistAsync(AccountSettings account, CancellationToken cancellationToken) =>
+        (await LoadPlaylistResultAsync(account, cancellationToken)).Channels;
+
+    public async Task<LoadResult> LoadPlaylistResultAsync(AccountSettings account, CancellationToken cancellationToken, IProgress<string>? progress = null)
     {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(TimeSpan.FromMinutes(2));
+        cancellationToken = deadline.Token;
+        progress?.Report("Downloading playlist...");
         var playlistUrl = BuildPlaylistUrl(account);
         var xtreamAccount = TryResolveXtreamAccount(account);
         AppLogger.Info("Loading playlist from " + AppLogger.SanitizeUrl(playlistUrl));
@@ -46,19 +51,22 @@ public sealed class PlaylistService
             AppLogger.Info("Playlist HTTP response. status=" + (int)response.StatusCode + " " + response.ReasonPhrase);
             response.EnsureSuccessStatusCode();
 
+            progress?.Report("Checking provider media types...");
             var mediaKindByStreamId = xtreamAccount is null
                 ? new Dictionary<string, MediaKind>(StringComparer.OrdinalIgnoreCase)
                 : await FetchXtreamMediaKindMapAsync(xtreamAccount, cancellationToken);
             AppLogger.Info("Xtream media kind map loaded. count=" + mediaKindByStreamId.Count);
 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            progress?.Report("Reading playlist items...");
             var channels = await ParseM3uFromStreamAsync(stream, mediaKindByStreamId, cancellationToken);
             AppLogger.Info("Playlist parsed. channels=" + channels.Count);
             if (channels.Count > 0)
             {
-                return xtreamAccount is null
-                    ? channels
-                    : await ReplaceSeriesWithApiPlaceholdersAsync(channels, xtreamAccount, cancellationToken);
+                if (xtreamAccount is null) return new LoadResult(channels, false, "Playlist loaded.");
+                progress?.Report("Loading series catalog...");
+                var (withSeries, partial) = await ReplaceSeriesWithApiPlaceholdersAsync(channels, xtreamAccount, cancellationToken);
+                return new LoadResult(withSeries, partial, partial ? "Series catalog unavailable; saved library retained when available." : "Playlist loaded.");
             }
 
             m3uFailure = new InvalidOperationException("Playlist was downloaded but no playable channels were found.");
@@ -72,15 +80,17 @@ public sealed class PlaylistService
         // (e.g. returning a non-standard status code with an empty body) while the
         // player_api.php JSON actions keep working. Fall back to building the channel
         // list straight from the API instead of failing outright.
+        cancellationToken.ThrowIfCancellationRequested();
         AppLogger.Warn("M3U playlist unavailable, falling back to the Xtream API directly. " + m3uFailure.Message);
 
         if (xtreamAccount is not null)
         {
-            var apiChannels = await BuildChannelsFromXtreamApiAsync(xtreamAccount, cancellationToken);
-            if (apiChannels.Count > 0)
+            progress?.Report("Trying provider API...");
+            var apiResult = await BuildChannelsFromXtreamApiAsync(xtreamAccount, cancellationToken);
+            if (apiResult.Channels.Count > 0)
             {
-                AppLogger.Info("Xtream API fallback succeeded. channels=" + apiChannels.Count);
-                return apiChannels;
+                AppLogger.Info("Xtream API fallback returned. channels=" + apiResult.Channels.Count);
+                return apiResult;
             }
         }
 
@@ -95,13 +105,13 @@ public sealed class PlaylistService
     // Xtream-API fallback uses (see AddXtreamSeriesPlaceholdersAsync). This runs
     // whenever the account has Xtream credentials, regardless of whether get.php
     // itself succeeded, so series browsing behaves the same on every account.
-    private async Task<List<Channel>> ReplaceSeriesWithApiPlaceholdersAsync(List<Channel> channels, AccountSettings account, CancellationToken cancellationToken)
+    private async Task<(List<Channel> Channels, bool Partial)> ReplaceSeriesWithApiPlaceholdersAsync(List<Channel> channels, AccountSettings account, CancellationToken cancellationToken)
     {
         if (!string.IsNullOrWhiteSpace(account.M3uUrl) ||
             string.IsNullOrWhiteSpace(account.Username) ||
             string.IsNullOrWhiteSpace(account.Password))
         {
-            return channels;
+            return (channels, false);
         }
 
         try
@@ -114,17 +124,24 @@ public sealed class PlaylistService
             var before = withoutSeries.Count;
 
             await AddXtreamSeriesPlaceholdersAsync(apiUrl, seriesCategories, withoutSeries, seenIds, cancellationToken);
+            if (channels.Any(channel => channel.MediaKind == MediaKind.Series) &&
+                !withoutSeries.Any(channel => channel.MediaKind == MediaKind.Series))
+            {
+                AppLogger.Warn("Series endpoint returned no placeholders; retaining M3U series rows.");
+                return (channels, true);
+            }
             AppLogger.Info("Replaced M3U series rows with API-backed series placeholders. placeholders=" + (withoutSeries.Count - before));
-            return withoutSeries;
+            return (withoutSeries, false);
         }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
             AppLogger.Warn("Could not replace M3U series rows with API placeholders; keeping them as individual episodes. " + ex.Message);
-            return channels;
+            return (channels, true);
         }
     }
 
-    private async Task<List<Channel>> BuildChannelsFromXtreamApiAsync(AccountSettings account, CancellationToken cancellationToken)
+    private async Task<LoadResult> BuildChannelsFromXtreamApiAsync(AccountSettings account, CancellationToken cancellationToken)
     {
         var apiUrl = BuildPlayerApiUrl(account);
         var streamBaseUrl = BuildStreamBaseUrl(account);
@@ -136,13 +153,20 @@ public sealed class PlaylistService
         var channels = new List<Channel>();
         var seenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        await AddXtreamChannelsAsync(apiUrl, streamBaseUrl, account, "get_live_streams", "live", MediaKind.Live, liveCategories, channels, seenIds, cancellationToken);
-        await AddXtreamChannelsAsync(apiUrl, streamBaseUrl, account, "get_vod_streams", "movie", MediaKind.Movie, vodCategories, channels, seenIds, cancellationToken);
-        await AddXtreamSeriesPlaceholdersAsync(apiUrl, seriesCategories, channels, seenIds, cancellationToken);
+        var partial = false;
+        try { await AddXtreamChannelsAsync(apiUrl, streamBaseUrl, account, "get_live_streams", "live", MediaKind.Live, liveCategories, channels, seenIds, cancellationToken); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) { partial = true; AppLogger.Warn("Live catalog unavailable. " + ex.Message); }
+        try { await AddXtreamChannelsAsync(apiUrl, streamBaseUrl, account, "get_vod_streams", "movie", MediaKind.Movie, vodCategories, channels, seenIds, cancellationToken); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) { partial = true; AppLogger.Warn("Movie catalog unavailable. " + ex.Message); }
+        try { await AddXtreamSeriesPlaceholdersAsync(apiUrl, seriesCategories, channels, seenIds, cancellationToken); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) { partial = true; AppLogger.Warn("Series catalog unavailable. " + ex.Message); }
 
         AppLogger.Info("Xtream API fallback built " + channels.Count +
             " channels (live + VOD + series). Series episodes are fetched on demand when a series is opened, since listing them all up front would require one API call per series.");
-        return channels;
+        return new LoadResult(channels, partial, partial ? "Provider API returned an incomplete catalog." : "Provider API loaded.");
     }
 
     // Series-kind channels here are placeholders (Url = "series:{seriesId}"): listing
@@ -160,11 +184,11 @@ public sealed class PlaylistService
         var url = AddOrReplaceQuery(apiUrl, new Dictionary<string, string> { ["action"] = "get_series" });
         using var response = await _httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         AppLogger.Info($"Xtream fallback response. action=get_series; status={(int)response.StatusCode} {response.ReasonPhrase}");
-        if (!response.IsSuccessStatusCode) return;
+        response.EnsureSuccessStatusCode();
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
-        if (document.RootElement.ValueKind != JsonValueKind.Array) return;
+        if (document.RootElement.ValueKind != JsonValueKind.Array) throw new InvalidOperationException("Series catalog was not a list.");
 
         var before = channels.Count;
         foreach (var item in document.RootElement.EnumerateArray())
@@ -182,7 +206,7 @@ public sealed class PlaylistService
             var id = CreateStableId(MediaKind.Series + "|" + name + "|" + placeholderUrl);
             if (!seenIds.Add(id)) continue;
 
-            channels.Add(new Channel
+            var series = new Channel
             {
                 Id = id,
                 Name = name.Trim(),
@@ -192,7 +216,9 @@ public sealed class PlaylistService
                 Url = placeholderUrl,
                 RawInfo = string.Empty,
                 MediaKind = MediaKind.Series
-            });
+            };
+            VodDiscovery.ReadProviderMetadata(series, item);
+            channels.Add(series);
         }
 
         AppLogger.Info($"Xtream fallback parsed. action=get_series; added={channels.Count - before}");
@@ -245,8 +271,11 @@ public sealed class PlaylistService
 
                 var episodeUrl = $"{streamBaseUrl}/series/{username}/{password}/{episodeId}.{extension}";
                 var id = CreateStableId(MediaKind.Series + "|" + title + "|" + episodeUrl);
+                _ = int.TryParse(season.Name, out var seasonNumber);
+                var episodeNumber = TryGetJsonText(episode, "episode_num", out var numberText) && int.TryParse(numberText, out var parsedNumber)
+                    ? parsedNumber : 0;
 
-                episodes.Add(new Channel
+                var channel = new Channel
                 {
                     Id = id,
                     Name = title.Trim(),
@@ -255,8 +284,14 @@ public sealed class PlaylistService
                     EpgId = string.Empty,
                     Url = episodeUrl,
                     RawInfo = string.Empty,
-                    MediaKind = MediaKind.Series
-                });
+                    MediaKind = MediaKind.Series,
+                    SeriesId = seriesId,
+                    SeasonNumber = seasonNumber,
+                    EpisodeNumber = episodeNumber
+                };
+                VodDiscovery.ReadProviderMetadata(channel, episode,
+                    episode.TryGetProperty("info", out var episodeInfo) ? episodeInfo : null);
+                episodes.Add(channel);
             }
         }
 
@@ -286,6 +321,7 @@ public sealed class PlaylistService
                 }
             }
         }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
             AppLogger.Warn($"Fetching {action} failed. Falling back to uncategorized. {ex.Message}");
@@ -309,11 +345,11 @@ public sealed class PlaylistService
         var url = AddOrReplaceQuery(apiUrl, new Dictionary<string, string> { ["action"] = action });
         using var response = await _httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         AppLogger.Info($"Xtream fallback response. action={action}; status={(int)response.StatusCode} {response.ReasonPhrase}");
-        if (!response.IsSuccessStatusCode) return;
+        response.EnsureSuccessStatusCode();
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
-        if (document.RootElement.ValueKind != JsonValueKind.Array) return;
+        if (document.RootElement.ValueKind != JsonValueKind.Array) throw new InvalidOperationException(action + " catalog was not a list.");
 
         var username = Uri.EscapeDataString(account.Username.Trim());
         var password = Uri.EscapeDataString(account.Password.Trim());
@@ -338,7 +374,7 @@ public sealed class PlaylistService
             var id = CreateStableId(mediaKind + "|" + name + "|" + streamUrl);
             if (!seenIds.Add(id)) continue;
 
-            channels.Add(new Channel
+            var channel = new Channel
             {
                 Id = id,
                 Name = name.Trim(),
@@ -348,7 +384,9 @@ public sealed class PlaylistService
                 Url = streamUrl,
                 RawInfo = string.Empty,
                 MediaKind = mediaKind
-            });
+            };
+            if (mediaKind != MediaKind.Live) VodDiscovery.ReadProviderMetadata(channel, item);
+            channels.Add(channel);
         }
 
         AppLogger.Info($"Xtream fallback parsed. action={action}; added={channels.Count - before}");
@@ -421,14 +459,14 @@ public sealed class PlaylistService
         var port = Get(serverInfo, "port");
 
         var sb = new StringBuilder();
-        sb.AppendLine("Account Information");
+        sb.AppendLine("Provider account information (current when checked)");
         sb.AppendLine();
         sb.AppendLine("Username: " + (string.IsNullOrWhiteSpace(username) ? "Hidden / unavailable" : username));
         sb.AppendLine("Status: " + (string.IsNullOrWhiteSpace(status) ? "Unknown" : status));
-        sb.AppendLine("Expiry date: " + expiry);
+        sb.AppendLine("Expiry (local time): " + expiry);
         sb.AppendLine("Created at: " + created);
         sb.AppendLine("Trial: " + (string.IsNullOrWhiteSpace(isTrial) ? "Unknown" : isTrial));
-        sb.AppendLine("Connections: " + (string.IsNullOrWhiteSpace(active) ? "?" : active) + " / " + (string.IsNullOrWhiteSpace(max) ? "?" : max));
+        sb.AppendLine("Connections in use / account limit: " + (string.IsNullOrWhiteSpace(active) ? "Unknown" : active) + " / " + (string.IsNullOrWhiteSpace(max) ? "Unknown" : max));
         sb.AppendLine();
         sb.AppendLine("Server Information");
         sb.AppendLine("Server time: " + (string.IsNullOrWhiteSpace(serverTime) ? "Unknown" : serverTime));
@@ -458,6 +496,7 @@ public sealed class PlaylistService
 
             return result;
         }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
             // Some providers expose M3U but block one or more player_api actions.
@@ -956,7 +995,13 @@ public sealed class PlaylistService
 
     private static string ExtractName(string extInf)
     {
-        var commaIndex = extInf.LastIndexOf(',');
+        var quoted = false;
+        var commaIndex = -1;
+        for (var index = 0; index < extInf.Length; index++)
+        {
+            if (extInf[index] == '"') quoted = !quoted;
+            else if (extInf[index] == ',' && !quoted) { commaIndex = index; break; }
+        }
         return commaIndex >= 0 && commaIndex + 1 < extInf.Length ? extInf[(commaIndex + 1)..] : string.Empty;
     }
 

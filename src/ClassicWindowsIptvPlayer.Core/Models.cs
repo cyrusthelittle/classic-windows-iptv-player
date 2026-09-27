@@ -62,6 +62,8 @@ public enum MediaKind
 
 public sealed class Channel
 {
+    [JsonIgnore] public string? IdentityName { get; set; }
+    [JsonIgnore] public string? IdentityGroup { get; set; }
     public string Id { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
     public string Group { get; set; } = "Uncategorized";
@@ -70,6 +72,14 @@ public sealed class Channel
     public string Url { get; set; } = string.Empty;
     public string RawInfo { get; set; } = string.Empty;
     public MediaKind MediaKind { get; set; } = MediaKind.Live;
+    public string SeriesId { get; set; } = string.Empty;
+    public int SeasonNumber { get; set; }
+    public int EpisodeNumber { get; set; }
+    public string Description { get; set; } = string.Empty;
+    public string Genre { get; set; } = string.Empty;
+    public int? Year { get; set; }
+    public int? DurationMinutes { get; set; }
+    public DateTimeOffset? AddedAt { get; set; }
 
     public override string ToString() => string.IsNullOrWhiteSpace(Group) ? Name : $"{Name}  •  {Group}";
 }
@@ -90,23 +100,131 @@ public sealed class AccountProfile
 public sealed class RecentItem
 {
     public string ChannelId { get; set; } = string.Empty;
+    public string ItemKey { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
     public string Group { get; set; } = string.Empty;
     public string Url { get; set; } = string.Empty;
     public MediaKind MediaKind { get; set; } = MediaKind.Live;
     public DateTime PlayedAtUtc { get; set; } = DateTime.UtcNow;
+    public string SeriesId { get; set; } = string.Empty;
+    public int SeasonNumber { get; set; }
+    public int EpisodeNumber { get; set; }
+}
+
+public sealed class ViewingProgress
+{
+    public string ItemKey { get; set; } = string.Empty;
+    public long PositionMs { get; set; }
+    public long DurationMs { get; set; }
+    public bool Watched { get; set; }
+    public bool Dismissed { get; set; }
+    public DateTime UpdatedAtUtc { get; set; }
+}
+
+public sealed class AccountLibraryState
+{
+    public List<string> FavoriteIds { get; set; } = [];
+    public List<FavoriteFolder> FavoriteFolders { get; set; } = [];
+    public List<RecentItem> Recent { get; set; } = [];
+    public Dictionary<string, ViewingProgress> ViewingProgress { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, string> GuideMappings { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public int GuideOffsetMinutes { get; set; }
+    public Dictionary<string, ChannelOrganization> ChannelOrganization { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, GroupOrganization> GroupOrganization { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+}
+
+public sealed class ChannelOrganization
+{
+    public string Name { get; set; } = string.Empty;
+    public bool Hidden { get; set; }
+    public int Order { get; set; }
+}
+
+public sealed class GroupOrganization
+{
+    public string Name { get; set; } = string.Empty;
+    public bool Hidden { get; set; }
+    public int Order { get; set; }
+}
+
+public sealed class FavoriteFolder
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public string Name { get; set; } = string.Empty;
+    public List<string> ChannelIds { get; set; } = [];
 }
 
 public sealed class AppState
 {
+    public const int CurrentSchemaVersion = 2;
+    public int SchemaVersion { get; set; } = CurrentSchemaVersion;
     private const string Free1PlaylistUrl = "https://iptv-org.github.io/iptv/index.country.m3u";
     private const string Free2PlaylistUrl = "https://bestiptv.hacks.tools/api/download?type=all&slug=index";
 
     public AccountSettings Account { get; set; } = new();
     public List<SavedAccount> Accounts { get; set; } = [];
     public string SelectedAccountId { get; set; } = string.Empty;
-    public List<string> FavoriteIds { get; set; } = [];
-    public List<RecentItem> Recent { get; set; } = [];
+    public Dictionary<string, AccountLibraryState> AccountLibraries { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    [JsonIgnore]
+    public List<string> FavoriteIds => SelectedLibrary.FavoriteIds;
+    [JsonIgnore]
+    public List<FavoriteFolder> FavoriteFolders => SelectedLibrary.FavoriteFolders;
+    [JsonIgnore]
+    public List<RecentItem> Recent => SelectedLibrary.Recent;
+
+    // Read old global collections once; never write them into the new format.
+    [JsonPropertyName("FavoriteIds")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<string>? LegacyFavoriteIds { get; set; }
+    [JsonPropertyName("FavoriteFolders")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<FavoriteFolder>? LegacyFavoriteFolders { get; set; }
+    [JsonPropertyName("Recent")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<RecentItem>? LegacyRecent { get; set; }
+
+    [JsonIgnore]
+    public AccountLibraryState SelectedLibrary
+    {
+        get
+        {
+            var id = string.IsNullOrWhiteSpace(SelectedAccountId) ? "unassigned" : SelectedAccountId;
+            AccountLibraries ??= new(StringComparer.OrdinalIgnoreCase);
+            if (!AccountLibraries.TryGetValue(id, out var library))
+                AccountLibraries[id] = library = new AccountLibraryState();
+            return library;
+        }
+    }
+
+    public bool MigrateLegacyCollections(IReadOnlyList<Channel> cachedChannels)
+    {
+        if (SchemaVersion > CurrentSchemaVersion)
+            throw new InvalidOperationException("Settings were written by a newer app version.");
+        if (SchemaVersion == CurrentSchemaVersion && LegacyFavoriteIds is null && LegacyFavoriteFolders is null && LegacyRecent is null)
+            return false;
+        EnsureAccounts();
+        var library = SelectedLibrary;
+        var oldToNew = cachedChannels.GroupBy(c => c.Id, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => ItemIdentity.For(g.First()), StringComparer.OrdinalIgnoreCase);
+        string Map(string id) => oldToNew.TryGetValue(id, out var key) ? key : id;
+        foreach (var id in LegacyFavoriteIds ?? [])
+            if (!library.FavoriteIds.Contains(Map(id), StringComparer.OrdinalIgnoreCase)) library.FavoriteIds.Add(Map(id));
+        foreach (var folder in LegacyFavoriteFolders ?? [])
+        {
+            folder.ChannelIds = folder.ChannelIds.Select(Map).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            library.FavoriteFolders.Add(folder);
+        }
+        foreach (var item in LegacyRecent ?? [])
+        {
+            item.ItemKey = oldToNew.TryGetValue(item.ChannelId, out var key) ? key : ItemIdentity.For(item);
+            library.Recent.Add(item);
+        }
+        LegacyFavoriteIds = null;
+        LegacyFavoriteFolders = null;
+        LegacyRecent = null;
+        SchemaVersion = CurrentSchemaVersion;
+        return true;
+    }
 
     // Stored in a separate compressed cache file. Keeping this out of state.json
     // prevents huge RAM spikes when saving favorites/recent items.
@@ -127,9 +245,10 @@ public sealed class AppState
     public int VolumeLevel { get; set; } = 100;
     public bool Muted { get; set; } = false;
 
-    // Local phone/browser remote control. Disabled by default for privacy/security.
-    public bool RemoteControlEnabled { get; set; } = false;
-    public int RemoteControlPort { get; set; } = 53177;
+    // Blank leaves LibVLC's stream default in place. Names/codes are matched only
+    // when a decoded track advertises a recognizable language.
+    public string PreferredAudioLanguage { get; set; } = string.Empty;
+    public string PreferredSubtitleLanguage { get; set; } = string.Empty;
 
     // Shared transparency for the auto-hide controls panel and volume OSD.
     // Range: 0.0 (fully transparent) .. 1.0 (fully opaque)
