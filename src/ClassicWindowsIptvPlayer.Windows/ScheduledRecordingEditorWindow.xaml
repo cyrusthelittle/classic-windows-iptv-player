@@ -1,0 +1,54 @@
+<Window x:Class="ClassicWindowsIptvPlayer.Windows.ScheduledRecordingEditorWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Schedule recording" Width="560" SizeToContent="Height"
+        MinWidth="500" WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize" ShowInTaskbar="False">
+    <Grid Margin="24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <StackPanel Grid.Row="0" Margin="0,0,0,18">
+            <TextBlock Text="Schedule this guide programme" FontSize="22" FontWeight="SemiBold"/>
+            <TextBlock Text="Choose the padding and save location, then select Schedule to save the job. Times are shown in your local time; the job stores UTC." Margin="0,6,0,0" TextWrapping="Wrap"/>
+        </StackPanel>
+        <Border Grid.Row="1" Padding="12" BorderBrush="{DynamicResource StrokeBrush}" BorderThickness="1" CornerRadius="4" Margin="0,0,0,16">
+            <StackPanel>
+                <TextBlock x:Name="ProgrammeText" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                <TextBlock x:Name="ChannelText" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                <TextBlock x:Name="ProgrammeTimeText" Margin="0,4,0,0" TextWrapping="Wrap"/>
+            </StackPanel>
+        </Border>
+        <Border Grid.Row="2" Padding="10" Background="{DynamicResource NoticeBgBrush}" BorderBrush="{DynamicResource NoticeBorderBrush}" BorderThickness="1" CornerRadius="4" Margin="0,0,0,14">
+            <TextBlock Text="Important: This schedule records only when the matching live HLS channel is already playing in this account at the scheduled time. It will not switch channels, open another provider stream, or wake the PC." Foreground="{DynamicResource NoticeTextBrush}" TextWrapping="Wrap"/>
+        </Border>
+        <Grid Grid.Row="3" Margin="0,0,0,14">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="16"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+            <StackPanel Grid.Column="0">
+                <TextBlock Text="Before programme (minutes)" Margin="0,0,0,5"/>
+                <ComboBox x:Name="PrePaddingBox" AutomationProperties.Name="Before programme padding in minutes" IsEditable="False" SelectedIndex="0"/>
+            </StackPanel>
+            <StackPanel Grid.Column="2">
+                <TextBlock Text="After programme (minutes)" Margin="0,0,0,5"/>
+                <ComboBox x:Name="PostPaddingBox" AutomationProperties.Name="After programme padding in minutes" IsEditable="False" SelectedIndex="0"/>
+            </StackPanel>
+        </Grid>
+        <TextBlock Grid.Row="4" x:Name="CaptureWindowText" Margin="0,0,0,14" TextWrapping="Wrap"/>
+        <StackPanel Grid.Row="5" Margin="0,0,0,8">
+            <TextBlock Text="Recording file (.ts)" Margin="0,0,0,5"/>
+            <DockPanel LastChildFill="True">
+                <Button x:Name="BrowseButton" DockPanel.Dock="Right" Content="Browse…" Padding="12,5" Margin="8,0,0,0" Click="Browse_Click" AutomationProperties.Name="Choose recording output file"/>
+                <TextBox x:Name="DestinationBox" MinHeight="30" VerticalContentAlignment="Center" AutomationProperties.Name="Recording output path"/>
+            </DockPanel>
+        </StackPanel>
+        <TextBlock Grid.Row="6" Text="The scheduled job stores the account/channel IDs, programme details, times, and file path only—no provider URL or credentials." Foreground="{DynamicResource Text2Brush}" TextWrapping="Wrap" Margin="0,0,0,16"/>
+        <StackPanel Grid.Row="7" Orientation="Horizontal" HorizontalAlignment="Right">
+            <TextBlock x:Name="ValidationText" Foreground="{DynamicResource ErrorTextBrush}" VerticalAlignment="Center" Margin="0,0,12,0" TextWrapping="Wrap" MaxWidth="290"/>
+            <Button Content="Cancel" IsCancel="True" MinWidth="82" Padding="10,6" Margin="0,0,8,0" AutomationProperties.Name="Cancel scheduled recording"/>
+            <Button x:Name="ScheduleButton" Content="Schedule" IsDefault="True" MinWidth="90" Padding="10,6" Click="Schedule_Click" AutomationProperties.Name="Create scheduled recording"/>
+        </StackPanel>
+    </Grid>
+</Window>

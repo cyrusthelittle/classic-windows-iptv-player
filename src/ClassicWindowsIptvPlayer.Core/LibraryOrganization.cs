@@ -26,7 +26,8 @@ public static class LibraryOrganization
                 Logo = item.Logo, EpgId = item.EpgId, Url = item.Url, RawInfo = item.RawInfo,
                 MediaKind = item.MediaKind, SeriesId = item.SeriesId, SeasonNumber = item.SeasonNumber,
                 EpisodeNumber = item.EpisodeNumber, Description = item.Description, Genre = item.Genre,
-                Year = item.Year, DurationMinutes = item.DurationMinutes, AddedAt = item.AddedAt
+                Year = item.Year, DurationMinutes = item.DurationMinutes, AddedAt = item.AddedAt,
+                CatchupMode = item.CatchupMode, ArchiveDays = item.ArchiveDays, ArchiveStreamId = item.ArchiveStreamId
             };
             result.Add((display, overrideGroup?.Order ?? 0, overrideItem?.Order ?? 0, i));
         }

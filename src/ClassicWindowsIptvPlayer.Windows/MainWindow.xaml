@@ -37,7 +37,6 @@
             <MenuItem Header="View">
                 <MenuItem Header="Show / hide channels   Ctrl+L" Click="ToggleChannels_Click" />
                 <MenuItem Header="Full screen   F11" Click="FullScreen_Click" />
-                <MenuItem Header="Mini player" Click="MiniPlayer_Click" />
                 <MenuItem Header="Show diagnostics" IsCheckable="True" Click="ToggleDiagnostics_Click" />
             </MenuItem>
             <MenuItem Header="Playback">
@@ -47,6 +46,7 @@
                 <MenuItem Header="Next   Right" Click="Next_Click" />
                 <Separator />
                 <MenuItem x:Name="GoLiveMenuItem" Header="Go live" Click="GoLive_Click" IsEnabled="False" />
+                <MenuItem x:Name="RewindLiveMenuItem" Header="Rewind 30 seconds" Click="RewindLive_Click" IsEnabled="False" />
                 <Separator />
                 <MenuItem Header="Restart stream" Click="RestartStream_Click" />
                 <MenuItem Header="Copy selected stream URL" Click="CopyStreamUrl_Click" />
@@ -54,8 +54,10 @@
                 <MenuItem Header="Favorite / unfavorite selected" Click="ToggleFavorite_Click" />
             </MenuItem>
             <MenuItem x:Name="SubtitleMenu" Header="Subtitles" />
-            <MenuItem x:Name="PlaybackPreferencesMenu" Header="Playback" SubmenuOpened="PlaybackPreferencesMenu_Opened"><MenuItem Header="Available during playback" IsEnabled="False" /></MenuItem>
-            <MenuItem Header="Settings">
+            <MenuItem Header="Settings" SubmenuOpened="SettingsMenu_Opened">
+                <MenuItem Header="Recording folder..." Click="ChooseRecordingFolder_Click" />
+                <MenuItem Header="Feedback endpoint..." Click="FeedbackEndpoint_Click" />
+                <Separator />
                 <MenuItem Header="Buffer 1 sec" Click="Buffer1_Click" />
                 <MenuItem Header="Buffer 3 sec" Click="Buffer3_Click" />
                 <MenuItem Header="Buffer 6 sec" Click="Buffer6_Click" />
@@ -72,6 +74,8 @@
                     <MenuItem x:Name="EpgEnabledMenuItem" Header="Programme guide (EPG)" IsCheckable="True" Click="ToggleEpg_Click" />
                     <MenuItem x:Name="UpdateChecksMenuItem" Header="Check for updates on startup" IsCheckable="True" Click="ToggleUpdateChecks_Click" />
                     <Separator />
+                    <MenuItem x:Name="RemoteControlMenuItem" Header="Phone remote" IsCheckable="True" Click="RemoteControlMenuItem_Click" />
+                    <Separator />
                     <MenuItem Header="OSD opacity (controls + volume)">
                         <MenuItem Header="Enter percentage..." Click="SetCustomOsdOpacity_Click" />
                         <Separator />
@@ -84,6 +88,7 @@
             </MenuItem>
             <MenuItem Header="Help">
                 <MenuItem x:Name="CheckForUpdatesMenuItem" Header="Check for updates..." Click="CheckForUpdates_Click" />
+                <MenuItem Header="Feedback..." Click="Feedback_Click" />
                 <Separator />
                 <MenuItem Header="GitHub" Click="GitHub_Click" />
                 <MenuItem Header="About" Click="About_Click" />
@@ -276,6 +281,7 @@
                             <TextBlock x:Name="BrowseGuideState" TextWrapping="Wrap" Margin="0,3,0,3" AutomationProperties.LiveSetting="Polite" />
                             <Button x:Name="BrowseNowButton" Content="Now: —" Click="BrowseProgramme_Click" Style="{StaticResource GhostButton}" HorizontalContentAlignment="Left" Margin="0,2,0,0" />
                             <Button x:Name="BrowseNextButton" Content="Next: —" Click="BrowseProgramme_Click" Style="{StaticResource GhostButton}" HorizontalContentAlignment="Left" Margin="0,2,0,0" />
+                            <Button x:Name="BrowseStartOverButton" Content="Start Over" Click="BrowseStartOver_Click" Style="{StaticResource GhostButton}" HorizontalAlignment="Left" Visibility="Collapsed" AutomationProperties.Name="Start selected programme over from its archive" />
                             <WrapPanel Margin="0,5,0,0">
                                 <Button x:Name="GuideRefreshButton" Content="Refresh" Click="RefreshEpg_Click" Style="{StaticResource GhostButton}" Margin="0,0,5,0" />
                                 <Button x:Name="GuideCancelButton" Content="Cancel" Click="CancelEpg_Click" Style="{StaticResource GhostButton}" Margin="0,0,5,0" />
@@ -304,7 +310,6 @@
                             <MenuItem Header="Next" Click="Next_Click" />
                             <Separator />
                             <MenuItem Header="Full screen" Click="FullScreen_Click" />
-                            <MenuItem Header="Mini player" Click="MiniPlayer_Click" />
                             <MenuItem x:Name="VideoGoLiveMenuItem" Header="Go live" Click="GoLive_Click" IsEnabled="False" />
                             <MenuItem Header="Restart stream" Click="RestartStream_Click" />
                             <MenuItem Header="Copy stream URL" Click="CopyStreamUrl_Click" />
@@ -380,6 +385,7 @@
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
                         </Grid.RowDefinitions>
 
                         <Slider x:Name="SeekSlider" Minimum="0" Maximum="1000" ValueChanged="SeekSlider_ValueChanged" PreviewMouseDown="SeekSlider_PreviewMouseDown" PreviewMouseUp="SeekSlider_PreviewMouseUp" Margin="0,0,0,8" />
@@ -390,16 +396,17 @@
                                 <Button x:Name="PreviousButton" Style="{StaticResource GhostButton}" Width="42" Margin="8,0,0,0" ToolTip="Previous channel" Click="Previous_Click" />
                                 <Button x:Name="PlayPauseButton" Style="{StaticResource PrimaryButton}" Width="54" Margin="8,0,0,0" ToolTip="Play or pause" Click="PlayPause_Click" />
                                 <Button x:Name="StopButton" Style="{StaticResource GhostButton}" Width="42" Margin="8,0,0,0" ToolTip="Stop" Click="Stop_Click" />
+                                <Button x:Name="RecordButton" Style="{StaticResource GhostButton}" Content="Record" Margin="8,0,0,0" ToolTip="Record the playing live channel" Click="Record_Click" IsEnabled="False" />
+                                <Button x:Name="StopRecordingButton" Style="{StaticResource GhostButton}" Content="Stop recording" Margin="5,0,0,0" Click="StopRecording_Click" IsEnabled="False" Visibility="Collapsed" />
+                                <Button x:Name="FavoriteButton" Style="{StaticResource GhostButton}" Width="42" Margin="5,0,0,0" ToolTip="Favorite" AutomationProperties.Name="Favorite or unfavorite selected channel" Click="ToggleFavorite_Click" />
                                 <Button x:Name="NextButton" Style="{StaticResource GhostButton}" Width="42" Margin="8,0,0,0" ToolTip="Next channel" Click="Next_Click" />
                                 <Button x:Name="MorePlaybackButton" Style="{StaticResource GhostButton}" Content="More" Margin="8,0,0,0" Click="MorePlayback_Click" AutomationProperties.Name="More playback actions">
                                     <Button.ContextMenu>
                                         <ContextMenu Opened="MorePlaybackMenu_Opened">
-                                            <MenuItem x:Name="MorePlaybackPreferencesMenu" Header="Playback preferences" SubmenuOpened="PlaybackPreferencesMenu_Opened"><MenuItem Header="Available during playback" IsEnabled="False" /></MenuItem>
-                                            <MenuItem Header="Mini player" Click="MiniPlayer_Click" />
+                                            <MenuItem Header="Open recent recording" Click="OpenRecentRecording_Click" />
                                             <MenuItem Header="Restart stream" Click="RestartStream_Click" />
                                             <MenuItem Header="Previous channel" Click="Previous_Click" />
                                             <MenuItem Header="Next channel" Click="Next_Click" />
-                                            <MenuItem Header="Favorite / unfavorite selected" Click="ToggleFavorite_Click" />
                                             <MenuItem Header="Copy playing stream URL" Click="CopyStreamUrl_Click" />
                                             <MenuItem Header="Stream information" Click="ShowStreamInfo_Click" />
                                         </ContextMenu>
@@ -409,7 +416,7 @@
                             </StackPanel>
 
                             <StackPanel Orientation="Horizontal" DockPanel.Dock="Right" VerticalAlignment="Center">
-                                <TextBlock x:Name="TimeText" Text="00:00 / 00:00" VerticalAlignment="Center" Foreground="{DynamicResource Text1Brush}" Margin="0,0,12,0" />
+                                <TextBlock x:Name="TimeText" Text="00:00 / 00:00" VerticalAlignment="Center" Foreground="{DynamicResource Text1Brush}" Margin="0,0,12,0" Visibility="Collapsed" />
                                 <Button x:Name="MuteButton" Style="{StaticResource GhostButton}" Width="46" ToolTip="Mute" Click="Mute_Click" />
                                 <Slider x:Name="VolumeSlider" Width="120" Minimum="0" Maximum="150" Value="100" ValueChanged="VolumeSlider_ValueChanged" Margin="10,0,16,0" />
                                 <Button x:Name="FullScreenButton" Style="{StaticResource GhostButton}" Width="46" ToolTip="Full screen" Click="FullScreen_Click" />
@@ -418,7 +425,15 @@
                             <TextBlock x:Name="NowPlayingText" Text="Select a channel to play" VerticalAlignment="Center" HorizontalAlignment="Center" Foreground="{DynamicResource Text1Brush}" TextTrimming="CharacterEllipsis" />
                         </DockPanel>
 
-                        <Border x:Name="EpgPanel" Grid.Row="2" Margin="0,6,0,0" Padding="8,5" CornerRadius="5"
+                        <Border Grid.Row="2" Margin="0,6,0,0" Padding="7,4" CornerRadius="5"
+                                Background="{DynamicResource Bg1Brush}" BorderBrush="{DynamicResource StrokeBrush}" BorderThickness="1">
+                            <DockPanel>
+                                <Button x:Name="OpenRecordingButton" DockPanel.Dock="Right" Content="Open recent" Click="OpenRecentRecording_Click" Style="{StaticResource GhostButton}" IsEnabled="False" Visibility="Collapsed" />
+                                <TextBlock x:Name="RecordingStatusText" Text="No recording" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" AutomationProperties.LiveSetting="Polite" />
+                            </DockPanel>
+                        </Border>
+
+                        <Border x:Name="EpgPanel" Grid.Row="3" Margin="0,6,0,0" Padding="8,5" CornerRadius="5"
                                 Background="{DynamicResource Bg1Brush}" BorderBrush="{DynamicResource StrokeBrush}" BorderThickness="1">
                             <Grid>
                                 <Grid.ColumnDefinitions>
@@ -437,11 +452,12 @@
                             </Grid>
                         </Border>
 
-                        <Grid Grid.Row="3" Margin="0,6,0,0" Visibility="Collapsed">
+                        <Grid Grid.Row="4" Margin="0,6,0,0" Visibility="Collapsed">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="90" />
                                 <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="Auto" />
@@ -460,14 +476,14 @@
                                 <ComboBoxItem Content="10 sec" Tag="10000" />
                             </ComboBox>
                             <TextBlock x:Name="LiveDelayText" Grid.Column="2" Text="" VerticalAlignment="Center" HorizontalAlignment="Right" Foreground="{DynamicResource Text2Brush}" FontWeight="SemiBold" Margin="12,0,0,0" Visibility="Collapsed" />
-                            <Button x:Name="GoLiveButton" Grid.Column="3" Style="{StaticResource PrimaryButton}" Content="Go Live" Margin="8,0,0,0" ToolTip="Jump to live edge" Click="GoLive_Click" Visibility="Collapsed" />
-                            <Button x:Name="RestartButton" Grid.Column="4" Style="{StaticResource GhostButton}" Margin="8,0,0,0" ToolTip="Restart stream" Click="RestartStream_Click" />
-                            <Button x:Name="CopyUrlButton" Grid.Column="5" Style="{StaticResource GhostButton}" Margin="8,0,0,0" ToolTip="Copy stream URL" Click="CopyStreamUrl_Click" />
-                            <Button x:Name="FavoriteButton" Grid.Column="6" Style="{StaticResource GhostButton}" Width="42" Margin="8,0,0,0" ToolTip="Favorite" Click="ToggleFavorite_Click" />
+                            <Button x:Name="RewindLiveButton" Grid.Column="3" Style="{StaticResource GhostButton}" Content="−30s" Margin="8,0,0,0" ToolTip="Rewind the current HLS stream by 30 seconds" Click="RewindLive_Click" IsEnabled="False" Visibility="Collapsed" />
+                            <Button x:Name="GoLiveButton" Grid.Column="4" Style="{StaticResource PrimaryButton}" Content="Go Live" Margin="8,0,0,0" ToolTip="Reconnect at the live edge" Click="GoLive_Click" Visibility="Collapsed" />
+                            <Button x:Name="RestartButton" Grid.Column="5" Style="{StaticResource GhostButton}" Margin="8,0,0,0" ToolTip="Restart stream" Click="RestartStream_Click" />
+                            <Button x:Name="CopyUrlButton" Grid.Column="6" Style="{StaticResource GhostButton}" Margin="8,0,0,0" ToolTip="Copy stream URL" Click="CopyStreamUrl_Click" />
                         </Grid>
 
                         <TextBlock x:Name="StreamInfoText"
-                                   Grid.Row="4"
+                                   Grid.Row="5"
                                    Text="State: Not ready | Resolution: detecting | Bandwidth: detecting | FPS: detecting | Video codec: detecting | Audio codec: detecting | Audio: detecting"
                                    Margin="0,10,0,0"
                                    Foreground="{DynamicResource Text2Brush}"

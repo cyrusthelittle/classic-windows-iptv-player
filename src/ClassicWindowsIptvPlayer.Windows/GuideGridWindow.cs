@@ -32,9 +32,12 @@ internal sealed class GuideGridWindow : Window
     private readonly System.Windows.Threading.DispatcherTimer _searchDelay = new() { Interval = TimeSpan.FromMilliseconds(250) };
     private DateTimeOffset _windowStart;
     private bool _updatingDate;
+    private readonly Action<Channel, EpgProgramme>? _watchArchive;
+    private readonly Action<Channel, EpgProgramme>? _scheduleRecording;
 
     public GuideGridWindow(EpgGuide guide, IReadOnlyList<Channel> channels, Channel? selected, Channel? playing,
-        Func<Channel, string?> mapping, int offsetMinutes, bool stale)
+        Func<Channel, string?> mapping, int offsetMinutes, bool stale, Action<Channel, EpgProgramme>? watchArchive = null,
+        Action<Channel, EpgProgramme>? scheduleRecording = null)
     {
         _guide = guide;
         _channels = channels.Where(channel => channel.MediaKind == MediaKind.Live).ToArray();
@@ -42,6 +45,8 @@ internal sealed class GuideGridWindow : Window
         _offsetMinutes = offsetMinutes;
         _playing = playing;
         _selected = selected;
+        _watchArchive = watchArchive;
+        _scheduleRecording = scheduleRecording;
         _status.Tag = stale ? "Saved guide is stale. Refresh from the main window. " : "";
         Title = "Programme guide";
         Width = 980;
@@ -134,9 +139,9 @@ internal sealed class GuideGridWindow : Window
         if (search.Length > 0)
         {
             var matches = GuideSearchRows.Create(_guide, _channels, search, _mapping, _offsetMinutes,
-                (channel, programme) => new GuideRow(channel.Name + Marker(channel), [programme], programme.Start, programme.Stop));
+                (channel, programme) => new GuideRow(channel, channel.Name + Marker(channel), [programme], programme.Start, programme.Stop));
             _rows.ItemsSource = matches;
-            _status.Text = (string)_status.Tag + $"{matches.Count:N0} programme matches across the loaded guide. Enter opens details.";
+            _status.Text = (string)_status.Tag + $"{matches.Count:N0} programme matches across the loaded guide. Select a programme to open details and schedule it.";
             return;
         }
 
@@ -149,11 +154,11 @@ internal sealed class GuideGridWindow : Window
         _rows.ItemsSource = new LazyList<GuideRow>(_channels.Count, index =>
         {
             var channel = _channels[index];
-            return new GuideRow(channel.Name + Marker(channel),
+            return new GuideRow(channel, channel.Name + Marker(channel),
                 _guide.GetProgrammes(channel, start, end, _mapping(channel), _offsetMinutes), start, end);
         });
         _status.Text = (string)_status.Tag + $"{start.LocalDateTime:g} to {end.LocalDateTime:g} · {_channels.Count:N0} channels. " +
-            "Up/Down: channel; Left/Right: two hours; Enter: programme details. Selected and playing channels are labeled separately.";
+            "Select a programme to view details and choose Schedule this programme. Up/Down: channel; Left/Right: two hours; Enter: programme details. Selected and playing channels are labeled separately.";
     }
 
     private static bool SameChannel(Channel left, Channel? right) => right is not null &&
@@ -163,7 +168,7 @@ internal sealed class GuideGridWindow : Window
         (SameChannel(channel, _selected) ? "  [Selected]" : "") +
         (SameChannel(channel, _playing) ? "  [Playing]" : "");
 
-    private static DataTemplate BuildTemplate()
+    private DataTemplate BuildTemplate()
     {
         var template = new DataTemplate(typeof(GuideRow));
         var row = new FrameworkElementFactory(typeof(StackPanel));
@@ -203,14 +208,22 @@ internal sealed class GuideGridWindow : Window
         return template;
     }
 
-    private static void ShowDetails(object sender, RoutedEventArgs e)
+    private void ShowDetails(object sender, RoutedEventArgs e)
     {
         if (sender is not Button { DataContext: GuideSlot slot } button) return;
         var programme = slot.Programme;
-        var text = $"{programme.Start.LocalDateTime:f} – {programme.Stop.LocalDateTime:t}";
-        if (!string.IsNullOrWhiteSpace(programme.Category)) text += "\n" + programme.Category;
-        if (!string.IsNullOrWhiteSpace(programme.Description)) text += "\n\n" + programme.Description;
-        MessageBox.Show(Window.GetWindow(button), text, programme.Title, MessageBoxButton.OK, MessageBoxImage.Information);
+        OpenProgramme(slot.Channel, programme);
+    }
+
+    private void OpenProgramme(Channel channel, EpgProgramme programme)
+    {
+        Action? watch = _watchArchive is null ? null : () =>
+        {
+            Close();
+            _watchArchive(channel, programme);
+        };
+        Action? schedule = _scheduleRecording is null ? null : () => _scheduleRecording(channel, programme);
+        new ProgrammeDetailsWindow(channel, programme, watch, schedule) { Owner = this }.ShowDialog();
     }
 
     private void RowsKeyDown(object sender, KeyEventArgs e)
@@ -221,13 +234,12 @@ internal sealed class GuideGridWindow : Window
             _rows.SelectedItem is GuideRow row && row.Programmes.Count > 0)
         {
             var programme = row.Programmes[0];
-            var text = $"{programme.Start.LocalDateTime:f} – {programme.Stop.LocalDateTime:t}\n\n{programme.Description}";
-            MessageBox.Show(this, text, programme.Title);
+            OpenProgramme(row.Channel, programme);
             e.Handled = true;
         }
     }
 
-    private sealed record GuideRow(string ChannelName, IReadOnlyList<EpgProgramme> Programmes,
+    private sealed record GuideRow(Channel Channel, string ChannelName, IReadOnlyList<EpgProgramme> Programmes,
         DateTimeOffset WindowStart, DateTimeOffset WindowEnd)
     {
         public IReadOnlyList<GuideSlot> Slots => Programmes.Select(programme =>
@@ -235,9 +247,9 @@ internal sealed class GuideGridWindow : Window
             var span = (WindowEnd - WindowStart).TotalSeconds;
             var left = Math.Max(0, (programme.Start - WindowStart).TotalSeconds / span * 720);
             var right = Math.Min(720, (programme.Stop - WindowStart).TotalSeconds / span * 720);
-            return new GuideSlot(programme, left, Math.Max(2, right - left),
+            return new GuideSlot(Channel, programme, left, Math.Max(2, right - left),
                 $"{programme.Start.LocalDateTime:t} {programme.Title}", programme.Description);
         }).ToArray();
     }
-    private sealed record GuideSlot(EpgProgramme Programme, double Left, double Width, string Label, string ToolTip);
+    private sealed record GuideSlot(Channel Channel, EpgProgramme Programme, double Left, double Width, string Label, string ToolTip);
 }

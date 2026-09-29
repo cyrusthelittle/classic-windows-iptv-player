@@ -3,6 +3,7 @@ using LibVLCSharp.Shared;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -30,8 +31,22 @@ public partial class MainWindow : Window
     private readonly PlaylistService _playlistService = new();
     private readonly EpgService _epgService = new();
     private readonly StreamProbeService _streamProbeService = new();
+    private readonly RemoteControlService _remoteControlService = new();
+    private readonly ConnectionBudget _recordingBudget = new();
+    private RecordingIndex _recordingIndex = new();
+    private AccountProfile? _recordingProfile;
+    private RecordingService? _recordingService;
+    private string? _activeRecordingId;
+    private Task? _recordingStopTask;
+    private Task? _recordingTransitionTask;
+    private Action? _afterRecordingStops;
+    private bool _stoppingForWindowClose;
+    private bool _closeAfterRecordingStop;
+    private string? _recordingFolder;
+    private int _remoteGeneration;
     private readonly StreamInfoTracker _streamInfoTracker = new();
     private readonly GitHubUpdateService _updateService = new();
+    private FeedbackOutbox _feedbackOutbox = null!;
     private readonly LibVLCSharp.WinForms.VideoView _videoView = new()
     {
         BackColor = System.Drawing.Color.Black,
@@ -143,6 +158,7 @@ public partial class MainWindow : Window
             ResetAccountView();
             _state = _store.Load();
             _state.Account = _state.EnsureSelectedAccount().Settings.Clone();
+            ApplyRemoteControlState(showStatus: false);
             await LoadChannelsAsync(false);
             StatusText.Text = "Local backup restored.";
         }
@@ -206,6 +222,7 @@ public partial class MainWindow : Window
     private double? _seriesReturnOffset;
     private VodSort _vodSort;
     private bool _isSeeking;
+    private bool _isSeekingLiveTimeshift;
     private bool _updatingSeekSlider;
     private bool _channelsVisible = true;
     private double _savedSidebarWidth = 360;
@@ -264,11 +281,13 @@ public partial class MainWindow : Window
     {
         _login = login;
         _state = _store.Load();
+        _feedbackOutbox = CreateFeedbackOutbox(_state);
         AppLogger.Info("MainWindow constructing. accountId=" + login.AccountId + "; updatePlaylist=" + login.UpdatePlaylist);
         _state.SelectedAccountId = login.AccountId;
         var selectedAccount = _state.EnsureSelectedAccount();
         selectedAccount.Settings = login.Account.Clone();
         _state.Account = selectedAccount.Settings.Clone();
+        _recordingIndex = _store.LoadRecordingIndex(login.AccountId) ?? new RecordingIndex();
         _store.Save(_state);
 
         InitializeComponent();
@@ -294,6 +313,7 @@ public partial class MainWindow : Window
         _searchTimer.Tick += (_, _) => { _searchTimer.Stop(); ApplyFilters(); };
 
         _positionTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+        _scheduledRecordingTimer.Tick += ScheduledRecordingTimer_Tick;
         _positionTimer.Tick += (_, _) =>
         {
             UpdatePlaybackPosition();
@@ -329,8 +349,29 @@ public partial class MainWindow : Window
         {
             if (_cursorHidden) SetCursorHidden(false);
         };
-        Closing += (_, _) =>
+        Closing += async (_, e) =>
         {
+            if (!_closeAfterRecordingStop && _recordingService?.ActiveCount > 0)
+            {
+                e.Cancel = true;
+                if (_stoppingForWindowClose) return;
+                _stoppingForWindowClose = true;
+                await StopRecordingsSafelyAsync(RecordingStopReason.Shutdown);
+                _stoppingForWindowClose = false;
+                _closeAfterRecordingStop = true;
+                Close();
+                return;
+            }
+            _isShuttingDown = true;
+            _scheduledRecordingTimer.Stop();
+            _scheduledRecordings?.Dispose();
+            _scheduledRecordings = null;
+            _recordingService?.Dispose();
+            _recordingService = null;
+            _feedbackOutbox.Dispose();
+            _multiViewWindow?.Close();
+            _multiViewWindow = null;
+            SaveRecordingIndex(_state.SelectedAccountId);
             SavePlaybackProgress(force: true);
             SaveCurrentAudioState();
             CleanupPlayer();
@@ -382,6 +423,7 @@ public partial class MainWindow : Window
             await Task.WhenAll(playerTask, channelsTask);
             InitializeBufferBox();
             InitializeVolumeControls();
+            ApplyRemoteControlState(showStatus: false);
             HideAccountLoading();
         }
         catch (Exception ex)
@@ -420,11 +462,269 @@ public partial class MainWindow : Window
 
         _tuner = new ChannelTuner(_libVlc) { MaxAttempts = GetReconnectAttempts() };
         _tuner.PlayerAttached += OnTunerPlayerAttached;
+        _tuner.ActiveMediaChanged += OnTunerActiveMediaChanged;
         _tuner.PlayerDetaching += OnTunerPlayerDetaching;
         _tuner.StateChanged += OnTunerStateChanged;
         _positionTimer.Start();
+            InitializeRecordingService();
         RefreshSubtitleTracks();
         AppLogger.Info("LibVLC player initialized.");
+    }
+
+    private void InitializeRecordingService()
+    {
+        _scheduledRecordingTimer.Stop();
+        _scheduledRecordings?.Dispose();
+        _scheduledRecordings = null;
+        _recordingService?.Dispose();
+        SaveRecordingIndex(_state.SelectedAccountId);
+        _recordingProfile = null;
+        _recordingIndex = _store.LoadRecordingIndex(_state.SelectedAccountId) ?? new RecordingIndex();
+        _recordingFolder = NormalizeRecordingFolder(_state.RecordingFolder);
+        _recordingService = new RecordingService(_recordingBudget, _recordingIndex);
+        _recordingService.StateChanged += snapshot => Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (_isShuttingDown) return;
+            if (snapshot.IsLive) _activeRecordingId = snapshot.RecordingId;
+            else if (_activeRecordingId == snapshot.RecordingId) _activeRecordingId = null;
+            RecordingStatusText.Text = $"{snapshot.StateText}: {snapshot.ChannelName}  {snapshot.Elapsed:mm\\:ss}  {snapshot.SizeText}";
+            UpdateRecordingControls();
+            RecordButton.IsEnabled = !snapshot.IsLive && _currentChannel?.MediaKind == MediaKind.Live && _tuner?.CanRecordActiveStream == true;
+        }));
+        _recordingService.CaptureFinished += outcome =>
+        {
+            var accountId = outcome.Entry?.AccountId ?? _state.SelectedAccountId;
+            if (Dispatcher.CheckAccess())
+                SaveRecordingIndex(accountId);
+            else
+                Dispatcher.Invoke(() => SaveRecordingIndex(accountId));
+
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+            _activeRecordingId = null;
+            var finalEntry = outcome.Entry is null ? null : _recordingIndex.Find(outcome.Entry.AccountId, outcome.Entry.Id);
+            var hasUsableFile = outcome.HasPlayableFile || finalEntry is { ByteSize: > 0 };
+            if (outcome.Succeeded || hasUsableFile)
+            {
+                var fileName = !string.IsNullOrWhiteSpace(outcome.FileName) ? outcome.FileName : finalEntry?.FileName ?? "recording";
+                var size = outcome.ByteSize > 0 ? outcome.ByteSize : finalEntry?.ByteSize ?? 0;
+                var stopped = outcome.Result == ClassicWindowsIptvPlayer.Core.RecordingOutcome.Stopped ||
+                    finalEntry?.Outcome == ClassicWindowsIptvPlayer.Core.RecordingOutcome.Stopped;
+                var message = $"{(stopped ? "Recording stopped" : "Recording finished")}: {fileName} ({RecordingPolicy.FormatBytes(size)})";
+                RecordingStatusText.Text = message;
+                StatusText.Text = message;
+            }
+            else
+            {
+                RecordingStatusText.Text = "Recording failed: " + AppLogger.SanitizeText(outcome.FailureReason);
+                StatusText.Text = RecordingStatusText.Text;
+            }
+            StopRecordingButton.IsEnabled = false;
+            UpdateRecordingControls();
+            UpdateRecentRecordingButton();
+            }));
+        };
+        UpdateRecordingControls();
+        UpdateRecentRecordingButton();
+        InitializeScheduledRecordingCoordinator();
+    }
+
+    private void SaveRecordingIndex(string accountId)
+    {
+        try { if (!string.IsNullOrWhiteSpace(accountId)) _store.SaveRecordingIndex(accountId, _recordingIndex); }
+        catch (Exception ex) { AppLogger.Error("Recording index save failed.", ex); }
+    }
+
+    private void UpdateRecordingControls()
+    {
+        if (RecordButton is null) return;
+        var hasActiveRecording = !string.IsNullOrEmpty(_activeRecordingId) &&
+            _recordingService?.Find(_activeRecordingId)?.IsLive == true;
+        var activeStreamAvailable = _tuner?.CanRecordActiveStream == true;
+        RecordButton.IsEnabled = !_isShuttingDown && _recordingService is not null && _currentChannel?.MediaKind == MediaKind.Live &&
+            activeStreamAvailable &&
+            !hasActiveRecording;
+        RecordButton.ToolTip = activeStreamAvailable
+            ? "Record the playing stream. Playback briefly retunes to add or remove file output."
+            : "Recording is available while a supported live stream is playing.";
+        ToolTipService.SetShowOnDisabled(RecordButton, true);
+        StopRecordingButton.Visibility = hasActiveRecording ? Visibility.Visible : Visibility.Collapsed;
+        StopRecordingButton.IsEnabled = !_isShuttingDown && hasActiveRecording;
+    }
+
+    private void UpdateRecentRecordingButton()
+    {
+        var recent = _recordingIndex.Recent(_state.SelectedAccountId).FirstOrDefault(entry =>
+            entry.Outcome != ClassicWindowsIptvPlayer.Core.RecordingOutcome.Recording && entry.ByteSize > 0);
+        OpenRecordingButton.IsEnabled = recent is not null;
+        var recentPath = recent is null ? null : !string.IsNullOrWhiteSpace(recent.FilePath)
+            ? recent.FilePath
+            : System.IO.Path.IsPathRooted(recent.FileName) ? recent.FileName
+            : null;
+        if (recentPath is not null && !System.IO.File.Exists(recentPath)) recentPath = null;
+        OpenRecordingButton.Tag = recentPath;
+        OpenRecordingButton.IsEnabled = recentPath is not null;
+    }
+
+    private static string? NormalizeRecordingFolder(string? folder)
+    {
+        if (string.IsNullOrWhiteSpace(folder)) return null;
+        try { return System.IO.Directory.Exists(folder) ? System.IO.Path.GetFullPath(folder) : null; }
+        catch (Exception exception) when (exception is ArgumentException or System.IO.IOException or UnauthorizedAccessException or NotSupportedException) { return null; }
+    }
+
+    private string GetRecordingFolder() => _recordingFolder ?? GetDefaultRecordingFolder();
+
+    private static string GetDefaultRecordingFolder()
+    {
+        return System.IO.Path.Combine(AppContext.BaseDirectory, "Recordings");
+    }
+
+    private void ChooseRecordingFolder_Click(object sender, RoutedEventArgs e)
+    {
+        using var dialog = new System.Windows.Forms.FolderBrowserDialog
+        {
+            Description = "Choose where instant and scheduled recordings are saved by default.",
+            ShowNewFolderButton = true,
+            SelectedPath = System.IO.Directory.Exists(GetRecordingFolder()) ? GetRecordingFolder() : Environment.GetFolderPath(Environment.SpecialFolder.MyVideos)
+        };
+        if (dialog.ShowDialog() != System.Windows.Forms.DialogResult.OK || string.IsNullOrWhiteSpace(dialog.SelectedPath)) return;
+        try
+        {
+            System.IO.Directory.CreateDirectory(dialog.SelectedPath);
+            var destination = RecordingPolicy.ValidateDestination(dialog.SelectedPath);
+            if (!destination.IsValid)
+            {
+                MessageBox.Show(this, destination.Message, "Recording folder unavailable", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            _recordingFolder = destination.Folder;
+            _state.RecordingFolder = destination.Folder;
+            _store.Save(_state);
+            StatusText.Text = "Default recording folder: " + destination.Folder;
+        }
+        catch (Exception exception)
+        {
+            AppLogger.Error("Could not save the default recording folder.", exception);
+            MessageBox.Show(this, "The recording folder could not be saved. " + AppLogger.SanitizeText(exception.Message),
+                "Recording folder", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private async void Record_Click(object sender, RoutedEventArgs e)
+    {
+        if (_recordingService is null || _currentChannel is null || _currentChannel.MediaKind != MediaKind.Live) return;
+        if (_tuner?.CanRecordActiveStream != true)
+        {
+            const string explanation = "Recording is available while a supported live stream is playing.";
+            RecordingStatusText.Text = explanation;
+            MessageBox.Show(this, explanation, "Recording unavailable", MessageBoxButton.OK, MessageBoxImage.Information);
+            UpdateRecordingControls();
+            return;
+        }
+        var accountId = _state.SelectedAccountId;
+        // The tuner owns the single playback input and briefly retunes it with
+        // display + file output; never start the recorder's independent URL path.
+        var profile = _recordingProfile ?? new AccountProfile();
+
+        var folder = GetRecordingFolder();
+        System.IO.Directory.CreateDirectory(folder);
+        var container = _tuner.GetActiveRecordingContainer();
+        var planTimeUtc = DateTimeOffset.UtcNow;
+        var plan = RecordingPolicy.Evaluate(profile, folder, _currentChannel, TimeSpan.Zero,
+            planTimeUtc, container, GetPlayingProgramme(), _recordingBudget,
+            targets: new RecordingTargets([], path => System.IO.File.Exists(path)));
+        if (!plan.IsAllowed || plan.Plan is null)
+        {
+            MessageBox.Show(this, plan.Message, "Cannot record", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        var requestedStartUtc = DateTimeOffset.UtcNow;
+        RecordButton.IsEnabled = false;
+        RecordingStatusText.Text = "Starting: " + _currentChannel.Name;
+        var tuner = _tuner;
+        if (tuner is null)
+        {
+            UpdateRecordingControls();
+            return;
+        }
+        var outcome = await _recordingService.StartRetunedAsync(new RecordingStartRequest
+        {
+            DestinationPath = plan.Plan.FilePath, AccountId = accountId,
+            ChannelId = _currentChannel.Id, ChannelKey = ItemIdentity.For(_currentChannel), ChannelName = _currentChannel.Name,
+            Profile = profile, Programme = GetPlayingProgramme(),
+            Container = container, RequestedStartUtc = requestedStartUtc,
+            BufferMs = GetPlaybackBufferMs()
+        }, tuner.StartRecordingOutputAsync, tuner.StopRecordingOutputAsync, CancellationToken.None);
+        if (!outcome.Accepted)
+        {
+            if (string.Equals(_activeRecordingId, outcome.RecordingId, StringComparison.Ordinal))
+                _activeRecordingId = null;
+            var finalEntry = outcome.Entry is null ? null : _recordingIndex.Find(outcome.Entry.AccountId, outcome.Entry.Id);
+            if (outcome.HasPlayableFile || finalEntry is { ByteSize: > 0 })
+            {
+                var fileName = !string.IsNullOrWhiteSpace(outcome.FileName) ? outcome.FileName : finalEntry?.FileName ?? "recording";
+                var size = outcome.ByteSize > 0 ? outcome.ByteSize : finalEntry?.ByteSize ?? 0;
+                RecordingStatusText.Text = $"Recording saved: {fileName} ({RecordingPolicy.FormatBytes(size)})";
+                StatusText.Text = RecordingStatusText.Text;
+                UpdateRecentRecordingButton();
+            }
+            else
+            {
+                var reason = AppLogger.SanitizeText(outcome.FailureReason);
+                var previousSuccess = _recordingIndex.Recent(accountId).FirstOrDefault(entry =>
+                    entry.Outcome != ClassicWindowsIptvPlayer.Core.RecordingOutcome.Recording && entry.ByteSize > 0);
+                var isDuplicateFailure = string.IsNullOrWhiteSpace(reason) && previousSuccess is not null &&
+                    previousSuccess.RequestedStartUtc <= (outcome.Entry?.RequestedStartUtc ?? DateTimeOffset.MaxValue);
+                if (!isDuplicateFailure)
+                {
+                    RecordingStatusText.Text = "Recording failed: " + (string.IsNullOrWhiteSpace(reason) ? "The capture did not produce a usable file." : reason);
+                    StatusText.Text = RecordingStatusText.Text;
+                }
+            }
+            UpdateRecordingControls();
+            return;
+        }
+        SaveRecordingIndex(accountId);
+        // A Stop during Starting can finish the capture before this awaited start
+        // continuation resumes. Do not resurrect its ID or overwrite the final status.
+        if (_recordingService.Find(outcome.RecordingId)?.IsLive != true)
+        {
+            UpdateRecordingControls();
+            return;
+        }
+        _activeRecordingId = outcome.RecordingId;
+        RecordingStatusText.Text = "Recording: " + _currentChannel.Name;
+        UpdateRecordingControls();
+    }
+
+    private async void StopRecording_Click(object sender, RoutedEventArgs e)
+    {
+        if (_recordingService is null || string.IsNullOrEmpty(_activeRecordingId)) return;
+        RecordingStatusText.Text = "Stopping recording…";
+        StopRecordingButton.IsEnabled = false;
+        await StopRecordingsSafelyAsync(RecordingStopReason.User);
+        SaveRecordingIndex(_state.SelectedAccountId);
+    }
+
+    private void OpenRecentRecording_Click(object sender, RoutedEventArgs e)
+    {
+        var path = (sender as System.Windows.Controls.MenuItem)?.Tag as string ?? OpenRecordingButton.Tag as string;
+        if (path is null || !System.IO.File.Exists(path))
+        {
+            MessageBox.Show(this, "The recent recording file could not be found.", "Open recording", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        try { Process.Start(new ProcessStartInfo(path) { UseShellExecute = true }); }
+        catch (Exception ex) { MessageBox.Show(this, AppLogger.SanitizeException(ex), "Open recording failed", MessageBoxButton.OK, MessageBoxImage.Error); }
+    }
+
+    private EpgProgramme? GetPlayingProgramme()
+    {
+        if (_currentChannel is null || _currentChannel.MediaKind != MediaKind.Live) return null;
+        _state.SelectedLibrary.GuideMappings.TryGetValue(ItemIdentity.For(_currentChannel), out var mappedId);
+        return _epgGuide?.GetNowNext(_currentChannel, mappedId: mappedId,
+            offsetMinutes: _state.SelectedLibrary.GuideOffsetMinutes).Now;
     }
 
     private void InitializeVideoSurface()
@@ -481,7 +781,7 @@ public partial class MainWindow : Window
             {
                 throw new InvalidOperationException("LibVLC did not accept the embedded video surface handle.");
             }
-            if (!VerifyVideoSurfaceOwner(_miniPlayerWindow ?? this))
+            if (!VerifyVideoSurfaceOwner(this))
                 throw new InvalidOperationException("LibVLC video surface is not owned by the expected player window.");
             AppLogger.Info("Video surface attached. expectedHwnd=0x" + videoHandle.ToInt64().ToString("X") +
                 "; playerHwnd=0x" + player.Hwnd.ToInt64().ToString("X") +
@@ -517,6 +817,30 @@ public partial class MainWindow : Window
         {
             // Dispatcher may already be shutting down; the tuner proceeds either way.
             AppLogger.Warn("Player detach handler failed. " + AppLogger.SanitizeText(ex.Message));
+        }
+    }
+
+    // A timeshift cursor replaces only the active Media input, not the player.
+    // Update the UI's ownership reference synchronously before the tuner retires
+    // the previous Media instance.
+    private void OnTunerActiveMediaChanged(MediaPlayer player, Media media, TuneRequest request)
+    {
+        try
+        {
+            Dispatcher.Invoke(() =>
+            {
+                if (_isShuttingDown || !ReferenceEquals(player, _mediaPlayer) ||
+                    !ReferenceEquals(player, _tuner?.CurrentPlayer)) return;
+                _currentMedia = media;
+                _preferredAudioApplied = false;
+                _preferredSubtitleApplied = false;
+                ApplySavedAudioState();
+                UpdateStreamInfo();
+            });
+        }
+        catch (Exception exception)
+        {
+            AppLogger.Warn("Active media UI update failed. " + AppLogger.SanitizeText(exception.Message));
         }
     }
 
@@ -562,10 +886,12 @@ public partial class MainWindow : Window
                     StatusText.Text = snapshot.Attempt <= 1
                         ? "Opening: " + snapshot.Request?.ChannelName
                         : $"Reconnecting ({snapshot.Attempt}/{snapshot.MaxAttempts}): {snapshot.Request?.ChannelName}";
+                    UpdateRecordingControls();
                     break;
                 case TunerStatus.Playing:
                     StatusText.Text = AppLogger.SanitizeText("Playing: " + snapshot.Request?.ChannelName + " • " + snapshot.Request?.SourceLabel);
                     UpdateStreamInfo();
+                    UpdateRecordingControls();
                     break;
                 case TunerStatus.Ended:
                     StatusText.Text = "Finished: " + snapshot.Request?.ChannelName;
@@ -582,8 +908,11 @@ public partial class MainWindow : Window
                     }
                     break;
                 case TunerStatus.Failed:
-                    StatusText.Text = "Could not start the stream. " + AppLogger.SanitizeText(snapshot.Detail);
+                    StatusText.Text = _catchupPlayback is { } archive
+                        ? Catchup.FailureMessage(archive.Source, archive.Programme, DateTimeOffset.UtcNow)
+                        : "Could not start the stream. " + AppLogger.SanitizeText(snapshot.Detail);
                     UpdateStreamInfo();
+                    UpdateRecordingControls();
                     break;
             }
         }));
@@ -1826,6 +2155,11 @@ public partial class MainWindow : Window
 
     private void PlayChannel(Channel channel, int? autoCandidateIndex, long? resumeTimeMs)
     {
+        if (_recordingService?.ActiveCount > 0)
+        {
+            QueueAfterRecordingStops(() => PlayChannel(channel, autoCandidateIndex, resumeTimeMs));
+            return;
+        }
         // Series entries loaded via the Xtream API fallback are placeholders (one per
         // series, not per episode) since listing episodes requires a separate API call
         // per series. Route these into the episode list (like drilling into a folder)
@@ -1869,8 +2203,9 @@ public partial class MainWindow : Window
 
             var candidateIndex = Math.Clamp(autoCandidateIndex ?? 0, 0, candidates.Count - 1);
             var candidate = candidates[candidateIndex];
+            ClearCatchup();
             var request = new TuneRequest(channel.Id, channel.Name, candidate.Url, candidate.Label,
-                channel.MediaKind == MediaKind.Live, GetPlaybackBufferMs());
+                channel.MediaKind == MediaKind.Live, GetPlaybackBufferMs(), _state.SelectedAccountId);
             _playbackState.Start(channel, candidates, candidateIndex, request);
             _playingSeriesEpisodes = channel.MediaKind == MediaKind.Series && _activeSeriesEpisodes is not null &&
                 _activeSeriesEpisodes.Any(episode => ItemIdentity.For(episode) == ItemIdentity.For(channel))
@@ -1880,6 +2215,7 @@ public partial class MainWindow : Window
             AppLogger.Info("Selected playback candidate. " + GetCandidateLogText(candidate, candidateIndex));
             _streamInfoTracker.ResetBandwidth();
             NowPlayingText.Text = channel.Name;
+            UpdateRecordingControls();
             _lastEpgUiUpdateUtc = DateTime.UtcNow;
             UpdateEpgDisplay();
             StatusText.Text = "Opening: " + channel.Name;
@@ -2053,6 +2389,7 @@ public partial class MainWindow : Window
         if (_mediaPlayer is null) return;
         if (_mediaPlayer.IsPlaying) PauseCurrentPlayback();
         else if (_pausedPlayback is not null) ResumePausedPlayback();
+        else if (_catchupPlayback is { } archive) _ = StartCatchupAsync(archive.Source, archive.Programme);
         else if (_currentChannel is not null) PlayChannel(_currentChannel);
         else if (ChannelList.SelectedItem is ChannelListEntry { Channel: { } channel }) PlayChannel(channel);
         UpdateStreamInfo();
@@ -2062,6 +2399,8 @@ public partial class MainWindow : Window
     {
         if (_mediaPlayer is null) return;
         SavePlaybackProgress(force: true);
+
+        PausePlayerImmediately(_mediaPlayer);
 
         if (_currentChannel is not null)
         {
@@ -2074,53 +2413,92 @@ public partial class MainWindow : Window
 
         _tuner?.NotifyUserPaused();
 
-        try
-        {
-            _mediaPlayer.Pause();
-            StartLivePauseTracking();
-        }
-        catch
-        {
-            // Ignore pause errors while preserving the resume snapshot.
-        }
+        StartLivePauseTracking();
 
         PlayPauseButton.Content = IconFactory.Create(IconFactory.Play);
+        TimeText.Visibility = _pausedPlayback is null ? Visibility.Collapsed : Visibility.Visible;
         StatusText.Text = _pausedPlayback is null
             ? "Paused."
             : "Paused at " + FormatTime(_pausedPlayback.TimeMs) + ".";
         UpdateStreamInfo();
     }
 
-    private void ResumePausedPlayback()
+    private async void ResumePausedPlayback()
     {
         if (_mediaPlayer is null || _pausedPlayback is null) return;
 
+        var player = _mediaPlayer;
         var snapshot = _pausedPlayback;
-        _pausedPlayback = null;
         _tuner?.NotifyUserResumed();
 
+        var resumed = false;
         try
         {
-            // The connection may have died while paused (providers drop idle
-            // streams); a refused resume falls through to a fresh tune below.
-            if (!_mediaPlayer.Play()) throw new InvalidOperationException("The player could not resume the stream.");
-            FinishLivePauseTracking();
-            PlayPauseButton.Content = IconFactory.Create(IconFactory.Pause);
-            StatusText.Text = "Resuming: " + snapshot.Channel.Name;
+            // Play() may reopen the current media and restart at its beginning.
+            // SetPause(false) explicitly resumes the existing paused input.
+            player.SetPause(false);
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
+            while (DateTime.UtcNow < deadline && ReferenceEquals(_mediaPlayer, player))
+            {
+                if (player.IsPlaying)
+                {
+                    resumed = true;
+                    break;
+                }
+                await Task.Delay(50);
+            }
         }
         catch
         {
-            var canSeekBack = snapshot.Channel.MediaKind != MediaKind.Live && snapshot.TimeMs > 0;
-            PlayChannel(snapshot.Channel, snapshot.CandidateIndex, canSeekBack ? snapshot.TimeMs : null);
-            if (snapshot.Channel.MediaKind == MediaKind.Live) ClearLiveDelay();
-            StatusText.Text = canSeekBack
-                ? "Resuming: " + snapshot.Channel.Name
-                : "Restarting live stream: " + snapshot.Channel.Name;
+            resumed = false;
         }
+
+        if (resumed && ReferenceEquals(_mediaPlayer, player))
+        {
+            _pausedPlayback = null;
+            FinishLivePauseTracking();
+            PlayPauseButton.Content = IconFactory.Create(IconFactory.Pause);
+            StatusText.Text = "Resumed: " + snapshot.Channel.Name;
+            TimeText.Visibility = Visibility.Collapsed;
+            UpdatePlaybackPosition();
+            return;
+        }
+
+        // Retry with a new input only if explicit resume did not reach Playing.
+        _pausedPlayback = null;
+        FinishLivePauseTracking();
+        if (_catchupPlayback is { } archive)
+        {
+            _ = ResumeCatchupAsync(archive, snapshot.TimeMs);
+            return;
+        }
+        if (snapshot.Channel.MediaKind == MediaKind.Live)
+        {
+            // Never turn a failed live resume into an implicit fresh tune. That
+            // silently loses the paused point; let the user choose Go Live.
+            ClearPauseResumeState();
+            FinishLivePauseTracking();
+            PlayPauseButton.Content = IconFactory.Create(IconFactory.Play);
+            StatusText.Text = "The paused live connection ended. Choose Go Live to reconnect at the live edge.";
+            UpdatePlaybackPosition();
+            return;
+        }
+        var canSeekBack = snapshot.Channel.MediaKind != MediaKind.Live && snapshot.TimeMs > 0;
+        PlayChannel(snapshot.Channel, snapshot.CandidateIndex, canSeekBack ? snapshot.TimeMs : null);
+        StatusText.Text = canSeekBack
+            ? "Resuming: " + snapshot.Channel.Name
+            : "Playback could not resume. Press Play to start again: " + snapshot.Channel.Name;
+    }
+
+    private static void PausePlayerImmediately(MediaPlayer player)
+    {
+        try { player.SetPause(true); }
+        catch { /* Keep pause responsive even if LibVLC is shutting the input down. */ }
     }
 
     private void StartLivePauseTracking()
     {
+        if (_catchupPlayback is not null) return;
         if (_currentChannel?.MediaKind != MediaKind.Live) return;
         _livePauseStartedUtc = DateTime.UtcNow;
         UpdateLiveDelayUi();
@@ -2159,14 +2537,22 @@ public partial class MainWindow : Window
     private void UpdateLiveDelayUi()
     {
         var behind = GetCurrentLiveBehind();
-        var show = behind >= TimeSpan.FromSeconds(1);
-        var text = show ? "Behind live " + FormatLiveDelay(behind) : string.Empty;
+        var show = _catchupPlayback is not null || behind >= TimeSpan.FromSeconds(1);
+        var text = _catchupPlayback is not null ? "Watching archive" : show ? "Behind live " + FormatLiveDelay(behind) : string.Empty;
+        LiveTimeshiftWindow? timeshiftWindow = null;
+        var hasTimeshift = _currentChannel?.MediaKind == MediaKind.Live &&
+            _tuner?.TryInspectLiveTimeshift(out timeshiftWindow, out _) == true;
+        var canRewind = hasTimeshift && timeshiftWindow!.Duration >= TimeSpan.FromSeconds(30) &&
+            _mediaPlayer?.State == VLCState.Playing;
 
         LiveDelayText.Text = text;
         LiveDelayText.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
         GoLiveButton.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
         GoLiveMenuItem.IsEnabled = show;
         VideoGoLiveMenuItem.IsEnabled = show;
+        RewindLiveButton.Visibility = hasTimeshift ? Visibility.Visible : Visibility.Collapsed;
+        RewindLiveButton.IsEnabled = canRewind;
+        RewindLiveMenuItem.IsEnabled = canRewind;
     }
 
     private static string FormatLiveDelay(TimeSpan delay)
@@ -2178,10 +2564,12 @@ public partial class MainWindow : Window
     private void ClearPauseResumeState()
     {
         _pausedPlayback = null;
+        if (TimeText is not null) TimeText.Visibility = Visibility.Collapsed;
         _tuner?.NotifyUserResumed();
         _pendingResumeTimeMs = null;
         _pendingResumeChannelId = string.Empty;
         _pendingResumeSeekAttempts = 0;
+        UpdateLiveDelayUi();
     }
 
     private void QueueResumeSeek(string channelId, long timeMs)
@@ -2229,17 +2617,69 @@ public partial class MainWindow : Window
 
     private void StopPlayback()
     {
-        CloseMiniPlayer();
+        if (_recordingService?.ActiveCount > 0)
+        {
+            QueueAfterRecordingStops(StopPlayback);
+            return;
+        }
+        ClearCatchup();
         SavePlaybackProgress(force: true);
         ClearPauseResumeState();
         ClearLiveDelay();
         // The tuner supersedes any in-flight tune/retry cycle and retires the
         // active player, so nothing can restart playback after an explicit stop.
         _playbackState.Stop();
+        UpdateRecordingControls();
         _sourceProbeCts?.Cancel();
         _sourceProbeCts = null;
         _tuner?.Stop();
         UpdateStreamInfo();
+    }
+
+    private void QueueAfterRecordingStops(Action action)
+    {
+        _afterRecordingStops = action;
+        if (_recordingTransitionTask is { IsCompleted: false }) return;
+        _recordingTransitionTask = StopRecordingThenContinueAsync();
+    }
+
+    private async Task StopRecordingThenContinueAsync()
+    {
+        await StopRecordingsSafelyAsync(RecordingStopReason.User);
+        await Dispatcher.InvokeAsync(() =>
+        {
+            var action = _afterRecordingStops;
+            _afterRecordingStops = null;
+            _recordingTransitionTask = null;
+            action?.Invoke();
+        });
+    }
+
+    private async Task StopRecordingsSafelyAsync(RecordingStopReason reason)
+    {
+        if (_recordingStopTask is { IsCompleted: false } pending)
+        {
+            await pending;
+            return;
+        }
+        var service = _recordingService;
+        if (service is null || service.ActiveCount == 0) return;
+
+        var stopTask = service.StopAllAsync(reason);
+        _recordingStopTask = stopTask;
+        try
+        {
+            await stopTask;
+            SaveRecordingIndex(_state.SelectedAccountId);
+        }
+        catch (Exception exception)
+        {
+            AppLogger.Warn("Stopping recordings with playback failed. " + AppLogger.SanitizeText(exception.Message));
+        }
+        finally
+        {
+            if (ReferenceEquals(_recordingStopTask, stopTask)) _recordingStopTask = null;
+        }
     }
 
     private void Previous_Click(object sender, RoutedEventArgs e) => PlayRelative(-1);
@@ -2411,6 +2851,16 @@ public partial class MainWindow : Window
         if (_mediaPlayer is null || _isSeeking) return;
         ApplyPreferredTracks(_mediaPlayer);
         SavePlaybackProgress(force: false);
+        if (TryGetLiveTimeshiftWindow(out var liveWindow) && liveWindow!.Duration > TimeSpan.Zero)
+        {
+            SeekSlider.IsEnabled = true;
+            _updatingSeekSlider = true;
+            try { SeekSlider.Value = LiveTimeshiftSliderValue(GetCurrentLiveBehind(), liveWindow.Duration); }
+            finally { _updatingSeekSlider = false; }
+            TimeText.Text = FormatLiveTimeshiftPosition(GetCurrentLiveBehind(), liveWindow.Duration);
+            TimeText.Visibility = Visibility.Visible;
+            return;
+        }
         var length = _mediaPlayer.Length;
         var time = _mediaPlayer.Time;
         if (length > 0)
@@ -2429,6 +2879,7 @@ public partial class MainWindow : Window
             finally { _updatingSeekSlider = false; }
             TimeText.Text = _mediaPlayer.IsPlaying ? "Live" : "00:00 / 00:00";
         }
+        TimeText.Visibility = _pausedPlayback is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private void SavePlaybackProgress(bool force)
@@ -2450,22 +2901,80 @@ public partial class MainWindow : Window
         return ts.TotalHours >= 1 ? ts.ToString(@"h\:mm\:ss") : ts.ToString(@"mm\:ss");
     }
 
-    private void SeekSlider_PreviewMouseDown(object sender, MouseButtonEventArgs e) => _isSeeking = true;
+    private void SeekSlider_PreviewMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        _isSeekingLiveTimeshift = TryGetLiveTimeshiftWindow(out var window) && window!.Duration > TimeSpan.Zero;
+        _isSeeking = true;
+    }
 
-    private void SeekSlider_PreviewMouseUp(object sender, MouseButtonEventArgs e)
+    private async void SeekSlider_PreviewMouseUp(object sender, MouseButtonEventArgs e)
     {
         _isSeeking = false;
+        if (_isSeekingLiveTimeshift)
+        {
+            _isSeekingLiveTimeshift = false;
+            await CommitLiveTimeshiftSliderAsync();
+            return;
+        }
         if (_mediaPlayer is null || _mediaPlayer.Length <= 0) return;
         _mediaPlayer.Time = PlaybackSeekMath.TimeForSlider(_mediaPlayer.Length, SeekSlider.Value);
     }
 
     private void SeekSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
-        if (_updatingSeekSlider || _mediaPlayer is null || _mediaPlayer.Length <= 0) return;
+        if (_updatingSeekSlider || _mediaPlayer is null) return;
+        if (TryGetLiveTimeshiftWindow(out var liveWindow) && liveWindow!.Duration > TimeSpan.Zero)
+        {
+            TimeText.Text = FormatLiveTimeshiftPosition(LiveTimeshiftBehindForSlider(SeekSlider.Value, liveWindow.Duration), liveWindow.Duration);
+            TimeText.Visibility = Visibility.Visible;
+            if (!_isSeeking && SeekSlider.IsKeyboardFocusWithin)
+                _ = CommitLiveTimeshiftSliderAsync();
+            return;
+        }
+        if (_mediaPlayer.Length <= 0) return;
         if (!_isSeeking && SeekSlider.IsKeyboardFocusWithin)
             _mediaPlayer.Time = PlaybackSeekMath.TimeForSlider(_mediaPlayer.Length, SeekSlider.Value);
         if (!_isSeeking && !SeekSlider.IsKeyboardFocusWithin) return;
         TimeText.Text = FormatTime(PlaybackSeekMath.TimeForSlider(_mediaPlayer.Length, SeekSlider.Value)) + " / " + FormatTime(_mediaPlayer.Length);
+    }
+
+    private bool TryGetLiveTimeshiftWindow(out LiveTimeshiftWindow? window)
+    {
+        window = null;
+        return _currentChannel?.MediaKind == MediaKind.Live && _tuner?.TryInspectLiveTimeshift(out window, out _) == true;
+    }
+
+    private static double LiveTimeshiftSliderValue(TimeSpan behindLive, TimeSpan available) =>
+        available <= TimeSpan.Zero ? 1000 : Math.Clamp(1000.0 * (1.0 - behindLive.TotalMilliseconds / available.TotalMilliseconds), 0, 1000);
+
+    private static TimeSpan LiveTimeshiftBehindForSlider(double sliderValue, TimeSpan available) =>
+        TimeSpan.FromMilliseconds(available.TotalMilliseconds * (1.0 - Math.Clamp(sliderValue, 0, 1000) / 1000.0));
+
+    private static string FormatLiveTimeshiftPosition(TimeSpan behindLive, TimeSpan available) =>
+        behindLive < TimeSpan.FromSeconds(1) ? "Live / " + FormatLiveDelay(available) : "Behind live " + FormatLiveDelay(behindLive) + " / " + FormatLiveDelay(available);
+
+    private async Task CommitLiveTimeshiftSliderAsync()
+    {
+        if (_tuner is null || !TryGetLiveTimeshiftWindow(out var window) || window!.Duration <= TimeSpan.Zero) return;
+        var targetBehindLive = LiveTimeshiftBehindForSlider(SeekSlider.Value, window.Duration);
+        TimeshiftPlaybackSwitchResult result;
+        if (targetBehindLive < TimeSpan.FromSeconds(1)) result = await _tuner.ReturnToLiveAsync();
+        else result = await _tuner.SeekLiveTimeshiftAsync(targetBehindLive);
+        if (result.Success)
+        {
+            ClearPauseResumeState();
+            _livePauseStartedUtc = null;
+            _liveBehind = targetBehindLive < TimeSpan.FromSeconds(1) ? TimeSpan.Zero : targetBehindLive;
+            StatusText.Text = targetBehindLive < TimeSpan.FromSeconds(1)
+                ? "Live: " + (_currentChannel?.Name ?? "")
+                : "Timeshift position: " + FormatLiveDelay(targetBehindLive) + " behind live";
+        }
+        else
+        {
+            StatusText.Text = result.FailureReason ?? "The requested timeshift position is unavailable.";
+        }
+        UpdatePlaybackPosition();
+        UpdateLiveDelayUi();
     }
 
     private void InitializeVolumeControls()
@@ -2592,7 +3101,7 @@ public partial class MainWindow : Window
         var compact = e.NewSize.Width < 690;
         PreviousButton.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
         NextButton.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
-        TimeText.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
+        TimeText.Visibility = !compact && _pausedPlayback is not null ? Visibility.Visible : Visibility.Collapsed;
         VolumeSlider.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
         NowPlayingText.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
     }
@@ -2600,12 +3109,6 @@ public partial class MainWindow : Window
     private void ToggleFullScreen()
     {
         if (_mediaPlayer is null) return;
-        if (_miniPlayerWindow is { } mini)
-        {
-            mini.WindowState = mini.WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
-            mini.Activate();
-            return;
-        }
         if (_isFullScreen) ExitFullScreen();
         else EnterFullScreen();
     }
@@ -3139,14 +3642,14 @@ public partial class MainWindow : Window
         BrowseNextButton.Content = "Next: " + FormatProgramme(_browseNext, "No upcoming programme");
         BrowseNowButton.IsEnabled = _browseNow is not null;
         BrowseNextButton.IsEnabled = _browseNext is not null;
+        UpdateCatchupButtons(channel);
     }
 
     private void BrowseProgramme_Click(object sender, RoutedEventArgs e)
     {
         var programme = ReferenceEquals(sender, BrowseNowButton) ? _browseNow : _browseNext;
         if (programme is null) return;
-        MessageBox.Show(this, BuildProgrammeToolTip(programme) ?? programme.Title,
-            programme.Title, MessageBoxButton.OK, MessageBoxImage.Information);
+        if (_playbackState.SelectedChannel is { } channel) ShowProgrammeDetails(channel, programme);
     }
 
     private void GuideGrid_Click(object sender, RoutedEventArgs e)
@@ -3158,7 +3661,8 @@ public partial class MainWindow : Window
             DateTimeOffset.UtcNow - _epgFetchedAt.Value >= GuideRefreshInterval;
         new GuideGridWindow(guide, _channels, _playbackState.SelectedChannel, _currentChannel,
             channel => library.GuideMappings.GetValueOrDefault(ItemIdentity.For(channel)),
-            library.GuideOffsetMinutes, stale) { Owner = this }.ShowDialog();
+            library.GuideOffsetMinutes, stale, (channel, programme) => _ = StartCatchupAsync(channel, programme),
+            (channel, programme) => ScheduleProgramme(channel, programme)) { Owner = this }.ShowDialog();
     }
 
     private async void GuideMap_Click(object sender, RoutedEventArgs e)
@@ -3225,6 +3729,15 @@ public partial class MainWindow : Window
             EpgNowText.Text = _epgGuide is null ? "No programme selected" : "Select a live channel";
             EpgNextText.Text = "—";
             EpgNowText.ToolTip = null;
+            EpgNextText.ToolTip = null;
+            return;
+        }
+
+        if (_catchupPlayback is { } archive)
+        {
+            EpgNowText.Text = "Archive: " + FormatProgramme(archive.Programme, "Programme");
+            EpgNextText.Text = "Go Live returns to the current broadcast.";
+            EpgNowText.ToolTip = BuildProgrammeToolTip(archive.Programme);
             EpgNextText.ToolTip = null;
             return;
         }
@@ -3447,7 +3960,16 @@ public partial class MainWindow : Window
             }
             AppLogger.Info("Changing account without restart. accountId=" + result.AccountId + "; updatePlaylist=" + result.UpdatePlaylist);
 
+            _multiViewWindow?.Close();
+            _multiViewWindow = null;
             StopPlayback();
+            await StopRecordingsSafelyAsync(RecordingStopReason.Restarted);
+            _scheduledRecordingTimer.Stop();
+            _scheduledRecordings?.Dispose();
+            _scheduledRecordings = null;
+            _recordingService?.Dispose();
+            SaveRecordingIndex(_state.SelectedAccountId);
+            _activeRecordingId = null;
             _libraryLoadCts?.Cancel();
             _seriesLoadCts?.Cancel();
             ++_libraryLoadGeneration;
@@ -3462,6 +3984,7 @@ public partial class MainWindow : Window
             selectedAccount.Settings = result.Account.Clone();
             _state.Account = selectedAccount.Settings.Clone();
             _store.Save(_state);
+            InitializeRecordingService();
 
             InitializeBufferBox();
             InitializeVolumeControls();
@@ -3498,6 +4021,7 @@ public partial class MainWindow : Window
 
     private void ResetAccountView()
     {
+        ClearCatchup();
         _filterCts?.Cancel();
         _sourceProbeCts?.Cancel();
         _sourceProbeCts?.Dispose();
@@ -3603,14 +4127,142 @@ public partial class MainWindow : Window
         return Math.Clamp(value, 1, 30);
     }
 
+    private static FeedbackOutbox CreateFeedbackOutbox(AppState state)
+    {
+        Uri? endpoint = AppState.TryValidateFeedbackEndpoint(state.FeedbackEndpoint, out var configured)
+            ? configured
+            : null;
+        var directory = Path.Combine(AppContext.BaseDirectory, "cache");
+        Directory.CreateDirectory(directory);
+        return new FeedbackOutbox(Path.Combine(directory, "feedback-outbox.dat"), endpoint);
+    }
+
+    private void FeedbackEndpoint_Click(object sender, RoutedEventArgs e) => EditFeedbackEndpoint(this);
+
+    private bool EditFeedbackEndpoint(Window owner)
+    {
+        var dialog = new FeedbackEndpointWindow(_state.FeedbackEndpoint) { Owner = owner };
+        if (dialog.ShowDialog() != true) return false;
+
+        _state.FeedbackEndpoint = dialog.Endpoint ?? string.Empty;
+        _store.Save(_state);
+        _feedbackOutbox.Dispose();
+        _feedbackOutbox = CreateFeedbackOutbox(_state);
+        StatusText.Text = string.IsNullOrEmpty(_state.FeedbackEndpoint)
+            ? "Feedback delivery is not configured."
+            : "Feedback endpoint saved in protected local settings.";
+        return !string.IsNullOrEmpty(_state.FeedbackEndpoint);
+    }
+
+    private async void Feedback_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var queued = await _feedbackOutbox.GetPendingAsync();
+            var previous = queued.FirstOrDefault(item => item.Type == "feedback");
+            FeedbackWindow? dialog = null;
+            dialog = new FeedbackWindow((message, includeLogs) => SendFeedbackAsync(message, includeLogs, dialog!), previous?.Message) { Owner = this };
+            dialog.ShowDialog();
+        }
+        catch
+        {
+            MessageBox.Show(this, "The saved feedback queue could not be opened. Existing queued messages were left untouched.",
+                "Feedback unavailable", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private async Task<FeedbackDeliveryResult> SendFeedbackAsync(string message, bool includeLogs, Window owner)
+    {
+        var queued = await _feedbackOutbox.GetPendingAsync();
+        var existing = queued.FirstOrDefault(item => item.Type == "feedback" &&
+            string.Equals(item.Message, message.Trim(), StringComparison.Ordinal));
+        var log = includeLogs ? ReadRecentFeedbackLogs() : null;
+        FeedbackQueueItem item;
+        if (existing is not null && await _feedbackOutbox.UpdateFeedbackAsync(existing.Id, message, log))
+            item = existing with { Message = message.Trim(), Log = log };
+        else
+            item = await _feedbackOutbox.EnqueueFeedbackAsync(message, log);
+        if (!AppState.TryValidateFeedbackEndpoint(_state.FeedbackEndpoint, out _))
+        {
+            // The Send click is explicit consent to deliver this message. Ask for
+            // the HTTPS destination only when delivery is actually requested.
+            if (!EditFeedbackEndpoint(owner))
+                return new(false, "Feedback is safely queued. Configure its HTTPS endpoint in Settings, then press Send again.", true);
+        }
+
+        var result = await _feedbackOutbox.SendAsync(item.Id);
+        return result.Status switch
+        {
+            FeedbackDeliveryStatus.Sent => new(true, "Feedback sent."),
+            FeedbackDeliveryStatus.EndpointNotConfigured => new(false, "Feedback is safely queued. Configure its HTTPS endpoint in Settings, then press Send again.", true),
+            FeedbackDeliveryStatus.QueuedForRetry => new(false, "Delivery failed. The message is saved on this device; press Send to retry.", true),
+            _ => new(false, "No message was sent. The queued message is still saved.", true)
+        };
+    }
+
+    private static string ReadRecentFeedbackLogs()
+    {
+        var directory = Path.GetDirectoryName(AppLogger.CurrentLogPath);
+        if (string.IsNullOrWhiteSpace(directory)) return string.Empty;
+
+        var sections = new List<string>();
+        foreach (var name in new[] { "app.log", "app.previous.log" })
+        {
+            var path = Path.Combine(directory, name);
+            try
+            {
+                if (!File.Exists(path)) continue;
+                using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                const int maxRead = 128 * 1024;
+                if (stream.Length > maxRead) stream.Seek(-maxRead, SeekOrigin.End);
+                using var reader = new StreamReader(stream);
+                var text = reader.ReadToEnd();
+                if (!string.IsNullOrWhiteSpace(text)) sections.Add(text);
+            }
+            catch { /* Omit unreadable diagnostics; the feedback message can still be sent. */ }
+        }
+        return string.Join("\n", sections);
+    }
+
     private void RestartStream_Click(object sender, RoutedEventArgs e)
     {
+        if (_catchupPlayback is { } archive)
+        {
+            _ = StartCatchupAsync(archive.Source, archive.Programme);
+            return;
+        }
         if (_currentChannel?.MediaKind == MediaKind.Live) ClearLiveDelay();
         if (_currentChannel is not null) PlayChannel(_currentChannel);
         else StatusText.Text = "Select a channel and press Play first.";
     }
 
-    private void GoLive_Click(object sender, RoutedEventArgs e)
+    private async void RewindLive_Click(object sender, RoutedEventArgs e)
+    {
+        if (_tuner is null || _currentChannel?.MediaKind != MediaKind.Live)
+        {
+            StatusText.Text = "Rewind is available only for a supported live HLS channel.";
+            return;
+        }
+
+        RewindLiveButton.IsEnabled = false;
+        var targetBehindLive = GetCurrentLiveBehind() + TimeSpan.FromSeconds(30);
+        var result = await _tuner.SeekLiveTimeshiftAsync(targetBehindLive);
+        if (result.Success)
+        {
+            ClearPauseResumeState();
+            _livePauseStartedUtc = null;
+            _liveBehind = targetBehindLive;
+            UpdateLiveDelayUi();
+            StatusText.Text = "Rewound to approximately " + FormatLiveDelay(targetBehindLive) + " behind live: " + _currentChannel.Name;
+        }
+        else
+        {
+            StatusText.Text = result.FailureReason ?? "The requested timeshift position is unavailable.";
+        }
+        UpdateLiveDelayUi();
+    }
+
+    private async void GoLive_Click(object sender, RoutedEventArgs e)
     {
         if (_currentChannel?.MediaKind != MediaKind.Live)
         {
@@ -3618,10 +4270,27 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (_tuner is not null && _tuner.TryInspectLiveTimeshift(out _, out _))
+        {
+            var result = await _tuner.ReturnToLiveAsync();
+            if (result.Success)
+            {
+                ClearPauseResumeState();
+                ClearLiveDelay();
+                StatusText.Text = "Live: " + _currentChannel.Name;
+            }
+            else
+            {
+                StatusText.Text = result.FailureReason ?? "Could not return to the live edge.";
+            }
+            UpdateLiveDelayUi();
+            return;
+        }
+
         ClearPauseResumeState();
         ClearLiveDelay();
         PlayChannel(_currentChannel);
-        StatusText.Text = "Back at live edge: " + _currentChannel.Name;
+        StatusText.Text = "Reconnecting at the live edge: " + _currentChannel.Name;
     }
 
     private void CopyStreamUrl_Click(object sender, RoutedEventArgs e)
@@ -4018,11 +4687,105 @@ public partial class MainWindow : Window
             : snapshot.FullText;
     }
 
+    private void ToggleRemoteControl_Click(object sender, RoutedEventArgs e)
+    {
+        _state.RemoteControlEnabled = !_state.RemoteControlEnabled;
+        _store.Save(_state);
+        ApplyRemoteControlState(showStatus: true);
+    }
+
+    private void ApplyRemoteControlState(bool showStatus)
+    {
+        var generation = ++_remoteGeneration;
+        try
+        {
+            if (_state.RemoteControlEnabled)
+            {
+                _remoteControlService.Start(_state.RemoteControlPort, command => HandleRemoteCommand(command, generation), GetRemoteControlState);
+                if (_state.RemoteControlPort != _remoteControlService.Port)
+                {
+                    _state.RemoteControlPort = _remoteControlService.Port;
+                    _store.Save(_state);
+                }
+                var urls = string.Join("\n", RemoteControlService.GetLocalUrls(_remoteControlService.Port));
+                if (showStatus)
+                    MessageBox.Show(this, "Open one of these addresses in your phone's browser while both devices are on the same trusted Wi-Fi network:\n\n" + urls +
+                        "\n\nThis controls the desktop player; it does not mirror or show the PC screen on your phone.",
+                        "Phone Remote", MessageBoxButton.OK, MessageBoxImage.Information);
+                StatusText.Text = "Phone remote enabled on the local network.";
+            }
+            else
+            {
+                _remoteControlService.Stop();
+                if (showStatus) StatusText.Text = "Phone remote disabled.";
+            }
+        }
+        catch (Exception ex)
+        {
+            _remoteControlService.Stop();
+            _state.RemoteControlEnabled = false;
+            _store.Save(_state);
+            MessageBox.Show(this, "Phone remote could not start.\n\n" + AppLogger.SanitizeText(ex.Message) +
+                "\n\nTry another port or allow the app through Windows Firewall.", "Phone Remote", MessageBoxButton.OK, MessageBoxImage.Warning);
+            StatusText.Text = "Phone remote failed to start.";
+        }
+    }
+
+    private void HandleRemoteCommand(string command, int generation)
+    {
+        Dispatcher.Invoke(new Action(() =>
+        {
+            if (generation != _remoteGeneration || _isShuttingDown || !_remoteControlService.IsRunning || !_state.RemoteControlEnabled || Dispatcher.HasShutdownStarted) return;
+            if (command.StartsWith("search:", StringComparison.OrdinalIgnoreCase))
+            {
+                SearchBox.Text = command["search:".Length..];
+                SearchBox.CaretIndex = SearchBox.Text.Length;
+                return;
+            }
+
+            switch (command)
+            {
+                case "media-all": SetMediaKindMode(0); break;
+                case "media-live": SetMediaKindMode(1); break;
+                case "media-movies": SetMediaKindMode(2); break;
+                case "media-series": SetMediaKindMode(3); break;
+                case "view-all": SetViewMode(0); break;
+                case "view-favorites": SetViewMode(1); break;
+                case "view-recent": SetViewMode(2); break;
+                case "browse-folders": SetBrowseMode(0); break;
+                case "browse-letters": SetBrowseMode(1); break;
+                case "browse-items": SetBrowseMode(2); break;
+                case "playpause": TogglePlayPause(); break;
+                case "stop": StopPlayback(); break;
+                case "previous": PlayRelative(-1); break;
+                case "next": PlayRelative(1); break;
+                case "fullscreen": ToggleFullScreen(); break;
+                case "channels": ToggleChannels_Click(this, new RoutedEventArgs()); break;
+                case "volume-up": SetVolume(_state.VolumeLevel + 5); break;
+                case "volume-down": SetVolume(_state.VolumeLevel - 5); break;
+                case "mute": SetMute(!_state.Muted); break;
+                case "up": MoveSelection(-1); break;
+                case "down": MoveSelection(1); break;
+                case "select": ActivateSelectedListEntry(); break;
+                case "back":
+                    if (_isFullScreen) ToggleFullScreen();
+                    else if (_activeSeriesId is not null || _activeFolder is not null || _activeLetter is not null)
+                        FolderBack_Click(this, new RoutedEventArgs());
+                    else if (!_isFullScreen && !_channelsVisible)
+                        ToggleChannels_Click(this, new RoutedEventArgs());
+                    break;
+            }
+        }));
+    }
+
+    private RemoteControlState GetRemoteControlState() => new(
+        Volatile.Read(ref _browseMode), Volatile.Read(ref _mediaKindMode), Volatile.Read(ref _viewMode));
+
     private void MoveSelection(int delta)
     {
         if (_visibleEntries.Count == 0) return;
         var index = ChannelList.SelectedIndex;
-        if (index < 0) index = 0;
+        if (index < 0) index = delta > 0 ? -1 : 1;
         index = Math.Clamp(index + delta, 0, _visibleEntries.Count - 1);
         ChannelList.SelectedIndex = index;
         ChannelList.ScrollIntoView(ChannelList.SelectedItem);
@@ -4174,9 +4937,11 @@ public partial class MainWindow : Window
 
     private void CleanupPlayer()
     {
+        ClearCatchup();
+        _isShuttingDown = true;
+        _remoteControlService.Dispose();
         try
         {
-            CloseMiniPlayer();
             _libraryLoadCts?.Cancel();
             _seriesLoadCts?.Cancel();
             ++_libraryLoadGeneration;

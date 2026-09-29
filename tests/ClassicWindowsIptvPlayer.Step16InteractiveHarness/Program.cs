@@ -13,11 +13,12 @@ namespace ClassicWindowsIptvPlayer.Step16InteractiveHarness;
 // Runs the production MainWindow in an isolated process-local data directory.
 // This is intentionally a visible WPF session: the operator can inspect the
 // rendered window and use keyboard/mouse while the harness records checkpoints.
-internal static class Program
+internal static partial class Program
 {
     [STAThread]
     private static void Main(string[] args)
     {
+        var automated = args.Contains("--automated", StringComparer.OrdinalIgnoreCase);
         var child = args.Contains("--child", StringComparer.OrdinalIgnoreCase);
         var root = child ? AppContext.BaseDirectory : Path.Combine(Path.GetTempPath(), "cyrus-step16-" + Guid.NewGuid().ToString("N"));
         if (!child)
@@ -26,14 +27,23 @@ internal static class Program
             foreach (var source in Directory.GetFiles(AppContext.BaseDirectory, "*", SearchOption.AllDirectories))
             {
                 var relative = Path.GetRelativePath(AppContext.BaseDirectory, source);
-                if (relative.StartsWith("cache\\", StringComparison.OrdinalIgnoreCase) || relative.StartsWith("logs\\", StringComparison.OrdinalIgnoreCase) || relative.Equals("accounts.json", StringComparison.OrdinalIgnoreCase)) continue;
+                if (relative.StartsWith("cache\\", StringComparison.OrdinalIgnoreCase) || relative.StartsWith("logs\\", StringComparison.OrdinalIgnoreCase) || relative.StartsWith("accounts.", StringComparison.OrdinalIgnoreCase)) continue;
                 var target = Path.Combine(root, relative);
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);
                 File.Copy(source, target, true);
             }
-            using var process = Process.Start(new ProcessStartInfo(Path.Combine(root, Path.GetFileName(Environment.ProcessPath!)), "--child") { WorkingDirectory = root });
-            process!.WaitForExit();
+            using var process = Process.Start(new ProcessStartInfo(Path.Combine(root, Path.GetFileName(Environment.ProcessPath!)), "--child" + (automated ? " --automated" : "") + (args.Contains("--native-dialogs") ? " --native-dialogs" : "")) { WorkingDirectory = root });
+            if (automated && !process!.WaitForExit(60000))
+            {
+                process.Kill(entireProcessTree: true);
+                File.WriteAllText(Path.Combine(root, "HARNESS_TIMEOUT.txt"), "Automated WPF harness exceeded 60 seconds.");
+                Environment.ExitCode = 1;
+                Console.WriteLine("Harness timeout: " + root);
+                return;
+            }
+            if (!automated) process!.WaitForExit();
             Console.WriteLine("Harness data: " + root);
+            Environment.ExitCode = process!.ExitCode;
             return;
         }
         var store = new ConfigStore();
@@ -57,6 +67,8 @@ internal static class Program
 
         var app = new App { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         app.InitializeComponent();
+        var startup = typeof(App).GetMethod("OnStartup", BindingFlags.Instance | BindingFlags.NonPublic, null, new[] { typeof(object), typeof(StartupEventArgs) }, null)!;
+        app.Startup -= (StartupEventHandler)startup.CreateDelegate(typeof(StartupEventHandler), app);
         MainWindow window;
         try
         {
@@ -64,6 +76,7 @@ internal static class Program
         }
         catch (Exception ex)
         {
+            Environment.ExitCode = 1;
             File.WriteAllText(Path.Combine(root, "HARNESS_ERROR.txt"), ex.ToString());
             Console.Error.WriteLine(ex);
             return;
@@ -88,6 +101,7 @@ internal static class Program
                     var labels = string.Join(" | ", list.Items.Cast<object>().Take(3).Select(item => item?.ToString() ?? "<null>"));
                     File.WriteAllText(Path.Combine(root, "HARNESS_READY.txt"), "Production MainWindow rendered.\nOverlay=" + overlay.Visibility + "\nItems=" + list.Items.Count + "\nLabels=" + labels + "\nRoot=" + root + "\n");
                     RunGroupMenuProbe(window, list, root);
+                    if (automated) { RunExtendedProbe(window, list, root); window.Close(); }
                 }));
             };
             timer.Start();
@@ -123,6 +137,7 @@ internal static class Program
             System.Windows.Threading.Dispatcher.PushFrame(wait);
             list.UpdateLayout();
             var after = string.Join(",", list.Items.Cast<object>().Select(GetFolder));
+            if (before == after) throw new InvalidOperationException("Move group down did not change group order.");
             File.AppendAllText(Path.Combine(root, "HARNESS_READY.txt"), "GroupMenu=PASS; Menu=" + headers + "; Before=" + before + "; After=" + after + "\n");
             menu.IsOpen = false;
             list.SelectedItem = list.Items.Cast<object>().FirstOrDefault(x => GetFolder(x) == "News");
@@ -139,10 +154,13 @@ internal static class Program
             moveItem.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent, moveItem));
             WaitUi(window);
             var itemAfter = string.Join(",", list.Items.Cast<object>().Select(GetChannelName));
+            if (itemBefore != "Zebra News,Alpha News" || itemAfter != "Alpha News,Zebra News")
+                Environment.ExitCode = 1;
             File.AppendAllText(Path.Combine(root, "HARNESS_READY.txt"), "ItemOrder=" + (itemBefore == "Zebra News,Alpha News" && itemAfter == "Alpha News,Zebra News" ? "PASS" : "FAIL") + "; Before=" + itemBefore + "; After=" + itemAfter + "\n");
         }
         catch (Exception ex)
         {
+            Environment.ExitCode = 1;
             File.AppendAllText(Path.Combine(root, "HARNESS_READY.txt"), "GroupMenu=FAIL; " + ex.Message + "\n");
         }
     }

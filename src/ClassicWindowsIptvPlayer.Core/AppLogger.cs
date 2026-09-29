@@ -18,6 +18,7 @@ public static class AppLogger
     private static readonly Regex UrlPattern = new(@"https?://[^\s<>""']+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex SecretAssignment = new(@"(?<![\w])(?<key>[\w%-]+)(?<separator>\s*(?:=|%3d|:\s+)\s*)(?<value>""[^""\r\n]*""|'[^'\r\n]*'|[^\s&;,<>""']+)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex XtreamPath = new(@"/(?:(?:live|movie|series)/)?[^/\s?#]+/[^/\s?#]+/\d+(?:\.[^/\s?#]+)?", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex TimeshiftPath = new(@"(?<prefix>/timeshift/)[^/\s?#]+/[^/\s?#]+(?=/)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     public static string CurrentLogPath => LogPath;
 
@@ -37,21 +38,6 @@ public static class AppLogger
                 $"session-{DateTime.UtcNow:yyyyMMddHHmmssfff}");
 
             Directory.CreateDirectory(freshDirectory);
-
-            foreach (var staleDirectory in Directory.EnumerateDirectories(logsRoot, "session-*", SearchOption.TopDirectoryOnly))
-            {
-                if (string.Equals(staleDirectory, freshDirectory, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                try
-                {
-                    Directory.Delete(staleDirectory, true);
-                }
-                catch
-                {
-                    // Leave any in-use directories alone while we start fresh.
-                }
-            }
 
             return freshDirectory;
         }
@@ -187,7 +173,8 @@ public static class AppLogger
     {
         return value.Equals("live", StringComparison.OrdinalIgnoreCase) ||
                value.Equals("movie", StringComparison.OrdinalIgnoreCase) ||
-               value.Equals("series", StringComparison.OrdinalIgnoreCase);
+               value.Equals("series", StringComparison.OrdinalIgnoreCase) ||
+               value.Equals("timeshift", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool LooksLikeStreamId(string value)
@@ -208,7 +195,8 @@ public static class AppLogger
 
     private static string RedactLooseSecrets(string value)
     {
-        var text = XtreamPath.Replace(value, match =>
+        var text = TimeshiftPath.Replace(value, "${prefix}***/***");
+        text = XtreamPath.Replace(text, match =>
         {
             var path = match.Value;
             var suffix = path.LastIndexOf('/');

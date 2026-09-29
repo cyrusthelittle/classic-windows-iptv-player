@@ -60,6 +60,8 @@ public enum MediaKind
     Series = 2
 }
 
+public enum CatchupMode { None = 0, Xtream = 1 }
+
 public sealed class Channel
 {
     [JsonIgnore] public string? IdentityName { get; set; }
@@ -80,6 +82,9 @@ public sealed class Channel
     public int? Year { get; set; }
     public int? DurationMinutes { get; set; }
     public DateTimeOffset? AddedAt { get; set; }
+    public CatchupMode CatchupMode { get; set; }
+    public int ArchiveDays { get; set; }
+    public string ArchiveStreamId { get; set; } = string.Empty;
 
     public override string ToString() => string.IsNullOrWhiteSpace(Group) ? Name : $"{Name}  •  {Group}";
 }
@@ -245,6 +250,10 @@ public sealed class AppState
     public int VolumeLevel { get; set; } = 100;
     public bool Muted { get; set; } = false;
 
+    // Optional phone/browser remote. The listener remains off until enabled.
+    public bool RemoteControlEnabled { get; set; }
+    public int RemoteControlPort { get; set; } = 53177;
+
     // Blank leaves LibVLC's stream default in place. Names/codes are matched only
     // when a decoded track advertises a recognizable language.
     public string PreferredAudioLanguage { get; set; } = string.Empty;
@@ -260,9 +269,30 @@ public sealed class AppState
     // EPG is opt-in because some providers expose very large or unreliable XMLTV feeds.
     public bool EpgEnabled { get; set; } = false;
 
+    // Default destination shared by instant and scheduled recordings.
+    public string RecordingFolder { get; set; } = string.Empty;
+
     // Update checks are enabled by default. Users can turn them off from the
     // update prompt or Settings, while Help > Check for updates remains available.
     public bool CheckForUpdatesOnStartup { get; set; } = true;
+
+    // Optional feedback delivery endpoint. This is saved only in the protected
+    // local state and is deliberately omitted from portable organization exports.
+    public string FeedbackEndpoint { get; set; } = string.Empty;
+
+    public const int FeedbackEndpointMaxLength = 2048;
+
+    public static bool TryValidateFeedbackEndpoint(string? value, out Uri? endpoint)
+    {
+        endpoint = null;
+        if (string.IsNullOrWhiteSpace(value) || value.Length > FeedbackEndpointMaxLength ||
+            !Uri.TryCreate(value.Trim(), UriKind.Absolute, out var parsed) ||
+            !string.Equals(parsed.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
+            string.IsNullOrWhiteSpace(parsed.Host) || !string.IsNullOrEmpty(parsed.UserInfo))
+            return false;
+        endpoint = parsed;
+        return true;
+    }
 
     // Tracks one-time additions to the built-in account list. This lets existing
     // installations receive new free accounts without restoring ones they remove.

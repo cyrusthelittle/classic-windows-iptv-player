@@ -14,6 +14,8 @@ public sealed record PortableSourcePreview(string AccountId, int FavoriteCount, 
 public sealed class ConfigStore
 {
     private const string ProtectedHeader = "CIPTV2\n";
+    private const string RecordingIndexPrefix = "recordings-";
+    private const string ScheduledRecordingIndexPrefix = "scheduled-recordings-";
     private static readonly byte[] Entropy = Encoding.UTF8.GetBytes("ClassicWindowsIptvPlayer local data v2");
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true, PropertyNameCaseInsensitive = true };
     private readonly string _appFolder;
@@ -63,6 +65,7 @@ public sealed class ConfigStore
             AtomicWrite(_statePath, Protect(JsonSerializer.SerializeToUtf8Bytes(state, JsonOptions)), replaceBackup: false);
             RecoveryNotice = "Settings were upgraded. Original settings and cache were kept as .migration.bak files. Favorites that could not be matched remain saved for a later provider refresh.";
         }
+        MarkInterruptedRecordings(state);
         return state;
     }
 
@@ -108,6 +111,113 @@ public sealed class ConfigStore
         var snapshot = JsonSerializer.Deserialize<EpgGuideSnapshot>(gzip, JsonOptions);
         return snapshot?.Programmes is not null && snapshot.Aliases is not null && snapshot.Channels is not null;
     }
+
+    // Account-scoped recordings index. It carries its own version because the existing
+    // caches have no schema field of their own, and it holds no source URL or credential,
+    // so there is nothing in it to redact.
+    public RecordingIndex? LoadRecordingIndex(string accountId)
+    {
+        var path = GetRecordingIndexPath(accountId);
+        if (!File.Exists(path) && !File.Exists(path + ".bak")) return null;
+        var bytes = ReadRecoverable(path, ValidateRecordingIndex);
+        using var input = new MemoryStream(Unprotect(bytes));
+        using var gzip = new GZipStream(input, CompressionMode.Decompress);
+        var index = JsonSerializer.Deserialize<RecordingIndex>(gzip, JsonOptions);
+        if (index is null) throw new InvalidDataException("The recordings index is empty.");
+        if (index.Version > RecordingIndex.CurrentVersion)
+            throw new InvalidDataException("The recordings index was written by a newer app version.");
+        index.Normalize();
+        return index;
+    }
+
+    public void SaveRecordingIndex(string accountId, RecordingIndex index)
+    {
+        index.Version = RecordingIndex.CurrentVersion;
+        index.Normalize();
+        using var output = new MemoryStream();
+        using (var gzip = new GZipStream(output, CompressionLevel.Fastest, leaveOpen: true))
+            JsonSerializer.Serialize(gzip, index, JsonOptions);
+        AtomicWrite(GetRecordingIndexPath(accountId), Protect(output.ToArray()));
+    }
+
+    public ScheduledRecordingIndex? LoadScheduledRecordingIndex(string accountId)
+    {
+        var path = GetScheduledRecordingIndexPath(accountId);
+        if (!File.Exists(path) && !File.Exists(path + ".bak")) return null;
+        var bytes = ReadRecoverable(path, ValidateScheduledRecordingIndex);
+        using var input = new MemoryStream(Unprotect(bytes));
+        using var gzip = new GZipStream(input, CompressionMode.Decompress);
+        var index = JsonSerializer.Deserialize<ScheduledRecordingIndex>(gzip, JsonOptions)
+            ?? throw new InvalidDataException("The scheduled recordings index is empty.");
+        if (index.Version > ScheduledRecordingIndex.CurrentVersion)
+            throw new InvalidDataException("The scheduled recordings index was written by a newer app version.");
+        if (index.Jobs.Any(job => !string.Equals(job.AccountId, accountId, StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidDataException("The scheduled recordings index contains a job for a different account.");
+        index.Normalize();
+        return index;
+    }
+
+    public void SaveScheduledRecordingIndex(string accountId, ScheduledRecordingIndex index)
+    {
+        if (string.IsNullOrWhiteSpace(accountId)) throw new ArgumentException("An account ID is required.", nameof(accountId));
+        if (index.Jobs.Any(job => !ScheduledRecordingPolicy.Validate(job).IsValid))
+            throw new InvalidDataException("The scheduled recordings index contains an invalid job.");
+        if (index.Jobs.Any(job => !string.Equals(job.AccountId, accountId, StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidDataException("The scheduled recordings index contains a job for a different account.");
+        index.Version = ScheduledRecordingIndex.CurrentVersion;
+        index.Normalize();
+        using var output = new MemoryStream();
+        using (var gzip = new GZipStream(output, CompressionLevel.Fastest, leaveOpen: true))
+            JsonSerializer.Serialize(gzip, index, JsonOptions);
+        AtomicWrite(GetScheduledRecordingIndexPath(accountId), Protect(output.ToArray()));
+    }
+
+    private static bool ValidateScheduledRecordingIndex(byte[] bytes)
+    {
+        using var input = new MemoryStream(Unprotect(bytes));
+        using var gzip = new GZipStream(input, CompressionMode.Decompress);
+        var index = JsonSerializer.Deserialize<ScheduledRecordingIndex>(gzip, JsonOptions);
+        return index is not null && index.Version > 0 && index.Jobs is not null &&
+            index.Jobs.All(job => ScheduledRecordingPolicy.Validate(job).IsValid);
+    }
+
+    public string GetScheduledRecordingIndexPath(string accountId) =>
+        Path.Combine(_appFolder, ScheduledRecordingIndexPrefix + SanitizeAccountId(accountId) + ".json.gz");
+
+    // Structural validation only. A version from a newer build is reported by the
+    // caller with its own message rather than being treated as a damaged file.
+    private static bool ValidateRecordingIndex(byte[] bytes)
+    {
+        using var input = new MemoryStream(Unprotect(bytes));
+        using var gzip = new GZipStream(input, CompressionMode.Decompress);
+        var index = JsonSerializer.Deserialize<RecordingIndex>(gzip, JsonOptions);
+        return index is not null && index.Version > 0 && index.Entries is not null;
+    }
+
+    // A capture cannot survive the app closing, so a row that is still marked as
+    // recording after startup describes a file that was never finalized. It is kept,
+    // not deleted: a partial recording is often still playable. A damaged index is
+    // left alone rather than allowed to make the settings unreadable; the recordings
+    // surface reports it when that account is opened.
+    private void MarkInterruptedRecordings(AppState state)
+    {
+        foreach (var account in state.Accounts)
+        {
+            RecordingIndex? index;
+            try { index = LoadRecordingIndex(account.Id); }
+            catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException) { continue; }
+            if (index is null) continue;
+            var interrupted = index.Unfinished(account.Id);
+            if (interrupted.Count == 0) continue;
+            foreach (var entry in interrupted)
+                index.Finish(entry, new RecordingFinish(entry.StartedUtc ?? DateTimeOffset.UtcNow, RecordingOutcome.Stopped,
+                    RecordingStopReason.Restarted, entry.ByteSize, "The app closed before this capture finished."));
+            SaveRecordingIndex(account.Id, index);
+        }
+    }
+
+    public string GetRecordingIndexPath(string accountId) =>
+        Path.Combine(_appFolder, RecordingIndexPrefix + SanitizeAccountId(accountId) + ".json.gz");
 
     private List<Channel> ReadChannelCache(string path)
     {
@@ -222,12 +332,27 @@ public sealed class ConfigStore
     public void CreateBackup(string path)
     {
         // The encrypted local files remain encrypted in this archive. Windows user
-        // protection means restoration requires the same Windows user profile.
+        // protection means restoration requires the same Windows user profile. Only the
+        // known cache families are collected, so a file an older or newer build left
+        // behind can never be smuggled into a restored data directory.
         using var file = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
         using var archive = new ZipArchive(file, ZipArchiveMode.Create);
         if (File.Exists(_statePath)) archive.CreateEntryFromFile(_statePath, "accounts.json");
-        foreach (var source in Directory.EnumerateFiles(_appFolder, "*.json.gz"))
+        foreach (var source in KnownCacheFiles())
             archive.CreateEntryFromFile(source, "cache/" + Path.GetFileName(source));
+    }
+
+    private IEnumerable<string> KnownCacheFiles()
+    {
+        foreach (var path in Directory.EnumerateFiles(_appFolder, "*.json.gz").OrderBy(path => path, StringComparer.Ordinal))
+        {
+            var name = Path.GetFileName(path);
+            if (name == "channels.json.gz" || name.StartsWith("channels-", StringComparison.Ordinal) ||
+                name.StartsWith("guide-", StringComparison.Ordinal) ||
+                name.StartsWith(RecordingIndexPrefix, StringComparison.Ordinal) ||
+                name.StartsWith(ScheduledRecordingIndexPrefix, StringComparison.Ordinal))
+                yield return path;
+        }
     }
 
     public void RestoreBackup(string path)
@@ -260,6 +385,14 @@ public sealed class ConfigStore
             else if (item.Key.StartsWith("cache/guide-", StringComparison.Ordinal))
             {
                 if (!ValidateGuideCache(item.Value)) throw new InvalidDataException("Backup guide cache is invalid.");
+            }
+            else if (item.Key.StartsWith("cache/" + RecordingIndexPrefix, StringComparison.Ordinal))
+            {
+                if (!ValidateRecordingIndex(item.Value)) throw new InvalidDataException("Backup recordings index is invalid.");
+            }
+            else if (item.Key.StartsWith("cache/" + ScheduledRecordingIndexPrefix, StringComparison.Ordinal))
+            {
+                if (!ValidateScheduledRecordingIndex(item.Value)) throw new InvalidDataException("Backup scheduled recordings index is invalid.");
             }
             else throw new InvalidDataException("Backup contains an unknown cache file.");
         }

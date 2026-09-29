@@ -1,0 +1,26 @@
+<Window x:Class="ClassicWindowsIptvPlayer.Windows.FeedbackWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Send feedback" Width="520" Height="340"
+        MinWidth="440" MinHeight="280" SizeToContent="Height"
+        WindowStartupLocation="CenterOwner" ResizeMode="CanResize"
+        ShowInTaskbar="False" Background="{DynamicResource Bg0Brush}">
+    <Grid Margin="24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <TextBlock Grid.Row="0" Text="Write a message" FontSize="21" FontWeight="Bold" Margin="0,0,0,12"/>
+        <TextBox Grid.Row="1" x:Name="MessageBox" MinHeight="150" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" AutomationProperties.Name="Feedback message"/>
+        <StackPanel Grid.Row="2" Margin="0,10,0,0">
+            <CheckBox x:Name="IncludeLogsCheckBox" Content="Include recent app logs (redacted)" IsChecked="True" AutomationProperties.Name="Include recent app logs"/>
+            <TextBlock Text="Logs can help diagnose problems. You can uncheck this before sending." Foreground="{DynamicResource Text2Brush}" TextWrapping="Wrap" Margin="22,4,0,0"/>
+        </StackPanel>
+        <DockPanel Grid.Row="3" Margin="0,14,0,0" LastChildFill="True">
+            <TextBlock x:Name="StatusText" Foreground="{DynamicResource Text2Brush}" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,12,0"/>
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                <Button Content="Cancel" MinWidth="82" Padding="12,6" Margin="0,0,8,0" IsCancel="True" Click="Cancel_Click"/>
+                <Button x:Name="SendButton" Style="{StaticResource PrimaryButton}" Content="Send" MinWidth="82" Padding="12,6" IsDefault="True" Click="Send_Click"/>
+            </StackPanel>
+        </DockPanel>
+    </Grid>
+</Window>

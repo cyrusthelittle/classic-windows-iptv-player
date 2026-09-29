@@ -122,6 +122,7 @@ public partial class FullScreenWindow : Window
             finally { _updatingSeekSlider = false; }
             TimeText.Text = _mediaPlayer.IsPlaying ? "Live" : "00:00 / 00:00";
         }
+        TimeText.Visibility = _mediaPlayer.State == VLCState.Paused ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void InitializeButtonIcons(bool muted)

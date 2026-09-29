@@ -28,7 +28,7 @@ internal static class IconFactory
 
     public static Viewbox Create(string geometry, double size = 18)
     {
-        var path = new Path
+        var path = new System.Windows.Shapes.Path
         {
             Data = Geometry.Parse(geometry),
             Stretch = Stretch.Uniform

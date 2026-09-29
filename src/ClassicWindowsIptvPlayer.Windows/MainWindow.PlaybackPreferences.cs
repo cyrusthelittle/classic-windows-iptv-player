@@ -1,6 +1,5 @@
 using ClassicWindowsIptvPlayer.Core;
 using LibVLCSharp.Shared;
-using LibVLCSharp.Shared.Structures;
 using System;
 using System.Linq;
 using System.Windows;
@@ -13,123 +12,91 @@ public partial class MainWindow
 {
     private bool _preferredAudioApplied;
     private bool _preferredSubtitleApplied;
+    private bool _settingsMenuStateHooked;
 
-    private void MorePlaybackMenu_Opened(object sender, RoutedEventArgs e) =>
-        MorePlaybackPreferencesMenu.Visibility = _mediaPlayer is not null ? Visibility.Visible : Visibility.Collapsed;
+    private void UpdateRemoteControlMenuState() => RemoteControlMenuItem.IsChecked = _state.RemoteControlEnabled && _remoteControlService.IsRunning;
 
-    private void PlaybackPreferencesMenu_Opened(object sender, RoutedEventArgs e)
+    private void SettingsMenu_Opened(object sender, RoutedEventArgs e)
     {
-        if (sender is not MenuItem menu) return;
-        menu.Items.Clear();
-        var player = _mediaPlayer;
-        if (player is null)
+        UpdateRemoteControlMenuState();
+        if (sender is MenuItem settings)
         {
-            menu.Items.Add(new MenuItem { Header = "Available during playback", IsEnabled = false });
-            return;
-        }
-        int videoCount;
-        TrackDescription[] audioTracks, subtitleTracks;
-        try
-        {
-            audioTracks = player.AudioTrackDescription.Where(t => t.Id >= 0).ToArray();
-            subtitleTracks = player.SpuDescription.Where(t => t.Id >= 0).ToArray();
-            videoCount = player.VideoTrackCount;
-        }
-        catch { return; }
-        var audioCount = audioTracks.Length;
-        var subtitleCount = subtitleTracks.Length;
-
-        if (PlaybackPreferencePolicy.HasAudioChoices(audioCount))
-        {
-            var tracks = new MenuItem { Header = "Audio track" };
-            foreach (var track in audioTracks)
+            if (!_settingsMenuStateHooked)
             {
-                var id = track.Id;
-                var item = new MenuItem { Header = track.Name, IsCheckable = true, IsChecked = id == player.AudioTrack };
-                item.Click += (_, _) => ApplyChange(player, () =>
+                settings.AddHandler(MenuItem.ClickEvent, new RoutedEventHandler(SettingsMenuItem_Click), true);
+                _settingsMenuStateHooked = true;
+            }
+            UpdateSettingsCheckmarks(settings);
+        }
+    }
+
+    private void SettingsMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is MenuItem settings) UpdateSettingsCheckmarks(settings);
+        else if (AppMenu.Items.OfType<MenuItem>().FirstOrDefault(item => item.Header?.ToString() == "Settings") is { } root)
+            UpdateSettingsCheckmarks(root);
+    }
+
+    private void UpdateSettingsCheckmarks(MenuItem settings)
+    {
+        var buffer = _state.PlaybackBufferMs <= 0 ? 1000 : Math.Clamp(_state.PlaybackBufferMs, 500, 30000);
+        foreach (var (header, selected) in new[]
+        {
+            ("Buffer 1 sec", buffer <= 1000),
+            ("Buffer 3 sec", buffer > 1000 && buffer <= 3000),
+            ("Buffer 6 sec", buffer > 3000 && buffer <= 6000),
+            ("Buffer 10 sec", buffer > 6000)
+        })
+        {
+            if (settings.Items.OfType<MenuItem>().FirstOrDefault(item => item.Header?.ToString() == header) is { } item)
+            {
+                item.IsCheckable = true;
+                item.IsChecked = selected;
+            }
+        }
+
+        var reconnect = settings.Items.OfType<MenuItem>().FirstOrDefault(item => item.Header?.ToString() == "Reconnect attempts");
+        if (reconnect is not null)
+        {
+            var attempts = _state.ReconnectAttempts <= 0 ? 10 : Math.Clamp(_state.ReconnectAttempts, 1, 30);
+            foreach (var (header, value) in new[]
+            {
+                ("5 attempts", 5), ("10 attempts (default)", 10),
+                ("15 attempts", 15), ("20 attempts", 20)
+            })
+            {
+                if (reconnect.Items.OfType<MenuItem>().FirstOrDefault(item => item.Header?.ToString() == header) is { } item)
                 {
-                    var selected = player.SetAudioTrack(id);
-                    if (selected) _preferredAudioApplied = true;
-                    return selected;
-                }, "Audio track selected.");
-                tracks.Items.Add(item);
+                    item.IsCheckable = true;
+                    item.IsChecked = attempts == value;
+                }
             }
-            if (tracks.Items.Count > 1) menu.Items.Add(tracks);
         }
-
-        if (audioCount > 0) AddLanguage(menu, "Preferred audio language", _state.PreferredAudioLanguage, value =>
-        {
-            _state.PreferredAudioLanguage = value;
-            _preferredAudioApplied = false;
-            ApplyPreferredTracks(player);
-        });
-        if (PlaybackPreferencePolicy.HasSubtitles(subtitleCount))
-        {
-            AddLanguage(menu, "Preferred subtitle language", _state.PreferredSubtitleLanguage, value =>
-            {
-                _state.PreferredSubtitleLanguage = value;
-                _preferredSubtitleApplied = false;
-                ApplyPreferredTracks(player);
-            });
-            if (player.Spu >= 0) AddDelay(menu, player, "Subtitle delay", player.SpuDelay, value => player.SetSpuDelay(value));
-        }
-        if (audioCount > 0) AddDelay(menu, player, "Audio delay", player.AudioDelay, value => player.SetAudioDelay(value));
-        if (PlaybackPreferencePolicy.HasVideo(videoCount))
-        {
-            var aspect = new MenuItem { Header = "Aspect ratio" };
-            foreach (var (label, ratio) in new (string Label, string? Ratio)[] { ("Original", null), ("16:9", "16:9"), ("4:3", "4:3"), ("21:9", "21:9") })
-            {
-                var item = new MenuItem { Header = label, IsCheckable = true, IsChecked = string.Equals(player.AspectRatio, ratio, StringComparison.Ordinal) };
-                item.Click += (_, _) => ApplyChange(player, () => { player.AspectRatio = ratio!; return true; }, "Aspect ratio: " + label);
-                aspect.Items.Add(item);
-            }
-            menu.Items.Add(aspect);
-            var deinterlace = new MenuItem { Header = "Deinterlace" };
-            foreach (var (label, mode) in new (string Label, string? Mode)[] { ("Off", null), ("Blend", "blend"), ("Yadif", "yadif") })
-            {
-                var item = new MenuItem { Header = label };
-                item.Click += (_, _) => ApplyChange(player, () => { player.SetDeinterlace(mode!); return true; }, "Deinterlace: " + label);
-                deinterlace.Items.Add(item);
-            }
-            menu.Items.Add(deinterlace);
-        }
-        if (_currentChannel is { } channel && PlaybackPreferencePolicy.HasVodSpeed(channel.MediaKind, player.IsSeekable, videoCount))
-        {
-            var speed = new MenuItem { Header = "Playback speed" };
-            foreach (var rate in new[] { 0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f })
-            {
-                var item = new MenuItem { Header = rate.ToString("0.##") + "×", IsCheckable = true, IsChecked = Math.Abs(player.Rate - rate) < 0.01f };
-                item.Click += (_, _) => ApplyChange(player, () => player.SetRate(rate) == 0, "Speed requested: " + item.Header);
-                speed.Items.Add(item);
-            }
-            menu.Items.Add(speed);
-        }
-        if (menu.Items.Count == 0) menu.Items.Add(new MenuItem { Header = "No options for this stream", IsEnabled = false });
+        DarkModeMenuItem.IsChecked = _state.DarkMode;
     }
 
-    private void AddLanguage(MenuItem parent, string label, string current, Action<string> set)
+    private void RemoteControlMenuItem_Click(object sender, RoutedEventArgs e)
     {
-        var menu = new MenuItem { Header = label };
-        foreach (var (name, code) in new[] { ("Stream default (next tune)", ""), ("English", "en"), ("German", "de"), ("French", "fr"), ("Spanish", "es"), ("Italian", "it"), ("Portuguese", "pt"), ("Japanese", "ja") })
-        {
-            var item = new MenuItem { Header = name, IsCheckable = true, IsChecked = current == code };
-            item.Click += (_, _) => { set(code); _store.Save(_state); };
-            menu.Items.Add(item);
-        }
-        parent.Items.Add(menu);
+        UpdateRemoteControlMenuState();
+        ToggleRemoteControl_Click(sender, e);
+        UpdateRemoteControlMenuState();
     }
 
-    private void AddDelay(MenuItem parent, MediaPlayer player, string label, long currentMicroseconds, Func<long, bool> set)
+    private void MorePlaybackMenu_Opened(object sender, RoutedEventArgs e)
     {
-        var menu = new MenuItem { Header = label };
-        foreach (var milliseconds in new[] { -1000, -500, -250, 0, 250, 500, 1000 })
+        var recent = _recordingIndex.Recent(_state.SelectedAccountId).FirstOrDefault(entry =>
+            !entry.IsActive && entry.ByteSize > 0);
+        var recentPath = recent is null ? null : !string.IsNullOrWhiteSpace(recent.FilePath)
+            ? recent.FilePath
+            : !string.IsNullOrWhiteSpace(_recordingFolder) ? System.IO.Path.Combine(_recordingFolder, recent.FileName) : null;
+        var openRecent = MorePlaybackButton.ContextMenu.Items.OfType<MenuItem>()
+            .FirstOrDefault(item => string.Equals(item.Header?.ToString(), "Open recent recording", StringComparison.Ordinal));
+        if (openRecent is not null)
         {
-            var item = new MenuItem { Header = (milliseconds > 0 ? "+" : "") + milliseconds + " ms", IsCheckable = true,
-                IsChecked = currentMicroseconds == PlaybackPreferencePolicy.DelayMicroseconds(milliseconds) };
-            item.Click += (_, _) => ApplyChange(player, () => set(PlaybackPreferencePolicy.DelayMicroseconds(milliseconds)), label + ": " + item.Header);
-            menu.Items.Add(item);
+            openRecent.Tag = recentPath;
+            openRecent.IsEnabled = recentPath is not null && System.IO.File.Exists(recentPath);
+            if (recentPath is not null) OpenRecordingButton.Tag = recentPath;
         }
-        parent.Items.Add(menu);
     }
 
     private void ApplyPreferredTracks(MediaPlayer player)
@@ -151,12 +118,5 @@ public partial class MainWindow
             }
         }
         catch { /* Native descriptions may be unavailable until decoder startup. */ }
-    }
-
-    private void ApplyChange(MediaPlayer? player, Func<bool> action, string message)
-    {
-        if (player is null || !ReferenceEquals(player, _mediaPlayer)) return;
-        try { StatusText.Text = action() ? message : "Playback option is unavailable for this stream."; }
-        catch (Exception ex) { StatusText.Text = "Playback option failed: " + AppLogger.SanitizeText(ex.Message); }
     }
 }

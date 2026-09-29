@@ -28,7 +28,11 @@ internal static class ThemeManager
         ["OverlayScrim"] = ("#F2F8FAFC", "#F20B1220"),
         ["InputLightBg"] = ("#F8FAFC", "#111C33"),
         ["InputLightText"] = ("#0F172A", "#F1F5F9"),
-        ["InputLightBorder"] = ("#64748B", "#475569")
+        ["InputLightBorder"] = ("#64748B", "#475569"),
+        ["NoticeBg"] = ("#FFFFF2D6", "#3B2F1B"),
+        ["NoticeBorder"] = ("#FFE0AD50", "#A8792B"),
+        ["NoticeText"] = ("#33240B", "#FFF1CC"),
+        ["ErrorText"] = ("#B00020", "#FDA4AF")
     };
 
     public static void Apply(bool dark)

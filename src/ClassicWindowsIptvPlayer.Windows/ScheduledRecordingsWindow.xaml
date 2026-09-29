@@ -1,0 +1,62 @@
+<Window x:Class="ClassicWindowsIptvPlayer.Windows.ScheduledRecordingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Scheduled recordings" Width="1040" Height="600"
+        MinWidth="760" MinHeight="420" WindowStartupLocation="CenterOwner"
+        AutomationProperties.Name="Scheduled recordings manager">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <DockPanel Grid.Row="0" Margin="0,0,0,12" LastChildFill="False">
+            <StackPanel DockPanel.Dock="Left">
+                <TextBlock Text="Scheduled recordings" FontSize="22" FontWeight="SemiBold"/>
+                <TextBlock x:Name="RefreshStatusText" Margin="0,4,0,0" Foreground="{DynamicResource Text2Brush}"
+                           AutomationProperties.Name="Schedule refresh status"/>
+            </StackPanel>
+            <Button x:Name="RefreshButton" DockPanel.Dock="Right" Content="Refresh"
+                    MinWidth="90" Padding="12,6" Click="Refresh_Click"
+                    AutomationProperties.Name="Refresh scheduled recordings"/>
+        </DockPanel>
+
+        <Border Grid.Row="1" Margin="0,0,0,12" Padding="10"
+                BorderBrush="{DynamicResource NoticeBorderBrush}" BorderThickness="1" CornerRadius="3"
+                Background="{DynamicResource NoticeBgBrush}">
+            <TextBlock Foreground="{DynamicResource NoticeTextBrush}" Text="This app will not wake Windows. A scheduled capture only attaches to the same supported channel when it is already playing; otherwise the job is marked missed or conflicted with a clear reason. Playback is not retuned or stopped."
+                       TextWrapping="Wrap" AutomationProperties.Name="Scheduling limitation"/>
+        </Border>
+
+        <DataGrid x:Name="JobsGrid" Grid.Row="2" AutoGenerateColumns="False"
+                  IsReadOnly="True" CanUserAddRows="False" CanUserDeleteRows="False"
+                  SelectionMode="Single" SelectionUnit="FullRow"
+                  HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                  AlternationCount="2" SelectionChanged="JobsGrid_SelectionChanged"
+                  AutomationProperties.Name="Scheduled recording jobs">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="Programme" Binding="{Binding ProgrammeTitle}" Width="2*"/>
+                <DataGridTextColumn Header="Channel" Binding="{Binding ChannelName}" Width="1.2*"/>
+                <DataGridTextColumn Header="Capture (local)" Binding="{Binding CaptureTimeText}" Width="2*"/>
+                <DataGridTextColumn Header="Padding" Binding="{Binding PaddingText}" Width="Auto" MinWidth="105"/>
+                <DataGridTextColumn Header="Status" Binding="{Binding StatusText}" Width="1*"/>
+                <DataGridTextColumn Header="Reason" Binding="{Binding Reason}" Width="2*"/>
+            </DataGrid.Columns>
+        </DataGrid>
+
+        <DockPanel Grid.Row="3" Margin="0,12,0,0" LastChildFill="False">
+            <TextBlock x:Name="EmptyStateText" DockPanel.Dock="Left" VerticalAlignment="Center"
+                       Foreground="{DynamicResource Text2Brush}" Text="" AutomationProperties.Name="Schedule list message"/>
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                <Button x:Name="CancelJobButton" Content="Cancel selected job"
+                        MinWidth="150" Padding="12,6" Margin="0,0,8,0"
+                        IsEnabled="False" Click="CancelJob_Click"
+                        AutomationProperties.Name="Cancel selected scheduled recording"/>
+                <Button Content="Close" IsCancel="True" MinWidth="85" Padding="12,6"
+                        AutomationProperties.Name="Close scheduled recordings"/>
+            </StackPanel>
+        </DockPanel>
+    </Grid>
+</Window>

@@ -22,6 +22,10 @@
         <Color x:Key="InputLightBg">#F8FAFC</Color>
         <Color x:Key="InputLightText">#0F172A</Color>
         <Color x:Key="InputLightBorder">#64748B</Color>
+        <Color x:Key="NoticeBg">#FFFFF2D6</Color>
+        <Color x:Key="NoticeBorder">#FFE0AD50</Color>
+        <Color x:Key="NoticeText">#33240B</Color>
+        <Color x:Key="ErrorText">#B00020</Color>
 
         <SolidColorBrush x:Key="Bg0Brush" Color="{StaticResource Bg0}" />
         <SolidColorBrush x:Key="Bg1Brush" Color="{StaticResource Bg1}" />
@@ -38,6 +42,10 @@
         <SolidColorBrush x:Key="InputLightBgBrush" Color="{StaticResource InputLightBg}" />
         <SolidColorBrush x:Key="InputLightTextBrush" Color="{StaticResource InputLightText}" />
         <SolidColorBrush x:Key="InputLightBorderBrush" Color="{StaticResource InputLightBorder}" />
+        <SolidColorBrush x:Key="NoticeBgBrush" Color="{StaticResource NoticeBg}" />
+        <SolidColorBrush x:Key="NoticeBorderBrush" Color="{StaticResource NoticeBorder}" />
+        <SolidColorBrush x:Key="NoticeTextBrush" Color="{StaticResource NoticeText}" />
+        <SolidColorBrush x:Key="ErrorTextBrush" Color="{StaticResource ErrorText}" />
 
         <Style TargetType="Window">
             <Setter Property="FontFamily" Value="Segoe UI" />

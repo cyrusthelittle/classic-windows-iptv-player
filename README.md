@@ -154,6 +154,10 @@ In full screen, `Up`/`Down` also control volume, and `Left`/`Right` change the c
 - Toggle **Settings > Check for updates on startup**. You can always run **Help > Check for updates...** manually.
 - When an update is found, choose **Remind me later**, **Never remind me**, or **Update now**. Updating opens the exact GitHub release page; it never installs software silently.
 
+## Phone remote
+
+Choose **Settings > Phone remote on/off** to enable the phone browser remote. The player shows local network addresses to open on your phone; both devices must be on the same trusted Wi-Fi network. The phone remote sends navigation and playback commands to the PC. It does not mirror the PC screen or use Phone Link. The listener is disabled by default; turn it off when you are finished. It has no login or encrypted connection, so do not enable it on a public or shared network.
+
 ## Portable data and privacy
 
 The application stores its data beside the executable:
@@ -167,9 +171,9 @@ logs/                         Runtime and crash logs
 
 Keep `accounts.json` private because it may contain provider credentials. Playlist caches and logs may also contain provider or channel information. Moving the entire extracted folder moves the application and its saved data together.
 
-The only outbound connections it makes are the ones you ask for: fetching a
-playlist or programme guide from the provider you entered, and the optional
-GitHub release check under **Settings**.
+Outbound connections fetch the playlist or programme guide from the provider you
+entered and, optionally, check GitHub for a release under **Settings**. When
+enabled, the phone remote also accepts commands over the local network.
 
 
 ## Build from source
