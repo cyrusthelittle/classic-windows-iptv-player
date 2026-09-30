@@ -59,7 +59,7 @@ These images render the actual WPF controls with ten invented channels and an is
 | Tracks and video preferences | Partial | Embedded subtitle selection and local subtitle files. No exposed audio-track/language preferences, timing adjustment, playback speed or full video-options UI. |
 | Appearance/accessibility | Partial | Light/dark themes, scalable WPF layout, resizable sidebar and fullscreen OSD. Missing accessible names, keyboard breadcrumbs, dependable keyboard seeking and compact reflow. |
 | Diagnostics and updates | Present, with gaps | Stream metrics, logs, optional GitHub checks and release-page links. Redaction has a reproduced flaw; crash output needs the same sanitation policy. No automatic install/update mechanism. |
-| Advanced TV | Absent in app | Provider catch-up, instant/scheduled recording, disk-backed timeshift, multi-view, casting and household profiles. These are independent future capabilities. |
+| Advanced TV | Partial | Provider catch-up, manual recording, disk-backed timeshift and multi-view are present. Scheduled recording has been removed. Casting and household profiles are absent. |
 
 Primary code: [core models](../src/ClassicWindowsIptvPlayer.Core/Models.cs), [playlist service](../src/ClassicWindowsIptvPlayer.Core/PlaylistService.cs), [main window](../src/ClassicWindowsIptvPlayer.Windows/MainWindow.xaml.cs), [tuner](../src/ClassicWindowsIptvPlayer.Windows/ChannelTuner.cs).
 

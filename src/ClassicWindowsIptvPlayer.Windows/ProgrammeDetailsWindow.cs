@@ -8,11 +8,11 @@ namespace ClassicWindowsIptvPlayer.Windows;
 
 internal sealed class ProgrammeDetailsWindow : Window
 {
-    public ProgrammeDetailsWindow(Channel channel, EpgProgramme programme, Action? watchArchive, Action? scheduleRecording = null)
+    public ProgrammeDetailsWindow(Channel channel, EpgProgramme programme, Action? watchArchive)
     {
         Title = programme.Title;
         Width = 460;
-        Height = 390;
+        Height = 320;
         MinWidth = 300;
         MinHeight = 220;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
@@ -21,20 +21,6 @@ internal sealed class ProgrammeDetailsWindow : Window
         panel.Children.Add(new TextBlock { Text = $"{programme.Start.LocalDateTime:f} – {programme.Stop.LocalDateTime:t}", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 8) });
         panel.Children.Add(new TextBlock { Text = programme.Category, TextWrapping = TextWrapping.Wrap });
         panel.Children.Add(new TextBlock { Text = programme.Description, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 12) });
-        if (scheduleRecording is not null)
-        {
-            var schedule = new Button { Name = "ScheduleRecordingButton", Content = "Schedule this programme…", Padding = new Thickness(10, 6, 10, 6), HorizontalAlignment = System.Windows.HorizontalAlignment.Left };
-            System.Windows.Automation.AutomationProperties.SetName(schedule, "Schedule this programme");
-            schedule.Click += (_, _) =>
-            {
-                // The callback opens the existing editor modally. Keep this details
-                // window alive until that editor returns, then close cleanly.
-                scheduleRecording();
-                DialogResult = true;
-            };
-            panel.Children.Add(schedule);
-            panel.Children.Add(new TextBlock { Text = "To schedule: choose this button, confirm padding and save location, then select Schedule. Capture is attempted only if this exact channel is already playing a supported shared HLS stream at the scheduled time. Playback will not be retuned and Windows will not be woken.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 6, 0, 8) });
-        }
         var availability = Catchup.Evaluate(channel, programme, DateTimeOffset.UtcNow);
         if (availability.Failure != CatchupFailure.Unsupported && watchArchive is not null)
         {

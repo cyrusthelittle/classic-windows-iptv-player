@@ -33,11 +33,9 @@ internal sealed class GuideGridWindow : Window
     private DateTimeOffset _windowStart;
     private bool _updatingDate;
     private readonly Action<Channel, EpgProgramme>? _watchArchive;
-    private readonly Action<Channel, EpgProgramme>? _scheduleRecording;
 
     public GuideGridWindow(EpgGuide guide, IReadOnlyList<Channel> channels, Channel? selected, Channel? playing,
-        Func<Channel, string?> mapping, int offsetMinutes, bool stale, Action<Channel, EpgProgramme>? watchArchive = null,
-        Action<Channel, EpgProgramme>? scheduleRecording = null)
+        Func<Channel, string?> mapping, int offsetMinutes, bool stale, Action<Channel, EpgProgramme>? watchArchive = null)
     {
         _guide = guide;
         _channels = channels.Where(channel => channel.MediaKind == MediaKind.Live).ToArray();
@@ -46,7 +44,6 @@ internal sealed class GuideGridWindow : Window
         _playing = playing;
         _selected = selected;
         _watchArchive = watchArchive;
-        _scheduleRecording = scheduleRecording;
         _status.Tag = stale ? "Saved guide is stale. Refresh from the main window. " : "";
         Title = "Programme guide";
         Width = 980;
@@ -141,7 +138,7 @@ internal sealed class GuideGridWindow : Window
             var matches = GuideSearchRows.Create(_guide, _channels, search, _mapping, _offsetMinutes,
                 (channel, programme) => new GuideRow(channel, channel.Name + Marker(channel), [programme], programme.Start, programme.Stop));
             _rows.ItemsSource = matches;
-            _status.Text = (string)_status.Tag + $"{matches.Count:N0} programme matches across the loaded guide. Select a programme to open details and schedule it.";
+            _status.Text = (string)_status.Tag + $"{matches.Count:N0} programme matches across the loaded guide. Select a programme to open details.";
             return;
         }
 
@@ -158,7 +155,7 @@ internal sealed class GuideGridWindow : Window
                 _guide.GetProgrammes(channel, start, end, _mapping(channel), _offsetMinutes), start, end);
         });
         _status.Text = (string)_status.Tag + $"{start.LocalDateTime:g} to {end.LocalDateTime:g} · {_channels.Count:N0} channels. " +
-            "Select a programme to view details and choose Schedule this programme. Up/Down: channel; Left/Right: two hours; Enter: programme details. Selected and playing channels are labeled separately.";
+            "Select a programme to view details. Up/Down: channel; Left/Right: two hours; Enter: programme details. Selected and playing channels are labeled separately.";
     }
 
     private static bool SameChannel(Channel left, Channel? right) => right is not null &&
@@ -222,8 +219,7 @@ internal sealed class GuideGridWindow : Window
             Close();
             _watchArchive(channel, programme);
         };
-        Action? schedule = _scheduleRecording is null ? null : () => _scheduleRecording(channel, programme);
-        new ProgrammeDetailsWindow(channel, programme, watch, schedule) { Owner = this }.ShowDialog();
+        new ProgrammeDetailsWindow(channel, programme, watch) { Owner = this }.ShowDialog();
     }
 
     private void RowsKeyDown(object sender, KeyEventArgs e)

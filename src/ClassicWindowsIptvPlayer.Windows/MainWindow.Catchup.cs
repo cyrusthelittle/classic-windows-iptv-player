@@ -43,7 +43,7 @@ public partial class MainWindow
     }
 
     private void ShowProgrammeDetails(Channel channel, EpgProgramme programme) =>
-        new ProgrammeDetailsWindow(channel, programme, () => _ = StartCatchupAsync(channel, programme), () => ScheduleProgramme(channel, programme)) { Owner = this }.ShowDialog();
+        new ProgrammeDetailsWindow(channel, programme, () => _ = StartCatchupAsync(channel, programme)) { Owner = this }.ShowDialog();
 
     private async Task ResumeCatchupAsync(CatchupPlaybackContext archive, long timeMs)
     {

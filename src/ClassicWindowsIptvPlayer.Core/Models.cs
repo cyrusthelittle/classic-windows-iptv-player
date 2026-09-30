@@ -269,7 +269,7 @@ public sealed class AppState
     // EPG is opt-in because some providers expose very large or unreliable XMLTV feeds.
     public bool EpgEnabled { get; set; } = false;
 
-    // Default destination shared by instant and scheduled recordings.
+    // Default destination for recordings.
     public string RecordingFolder { get; set; } = string.Empty;
 
     // Update checks are enabled by default. Users can turn them off from the

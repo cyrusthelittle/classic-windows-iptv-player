@@ -26,12 +26,12 @@ public enum RecordingCaptureState
 
 /// <summary>
 /// One capture request. Sources are provided either by the already-playing tuner's
-/// output (instant recording) or by its shared HLS consumer (scheduled recording).
+/// output or by an attached shared HLS consumer.
 /// </summary>
 public sealed record RecordingStartRequest
 {
     public string StreamUrl { get; init; } = string.Empty;
-    /// <summary>Existing live HLS source consumer used by scheduled capture.</summary>
+    /// <summary>Existing live HLS source consumer used by shared-source capture.</summary>
     public SharedHlsConsumer? SharedHlsConsumer { get; init; }
 
     /// <summary>Absolute path of the file to write. The extension is corrected to the container the capture actually uses.</summary>
@@ -112,8 +112,8 @@ public sealed record RecordingOutcome
 }
 
 /// <summary>
-/// Owns live capture. Instant captures use the tuner's current LibVLC input; scheduled
-/// captures may attach to an existing shared HLS source.
+/// Owns live capture. Captures use the tuner's current LibVLC input or may attach to an
+/// existing shared HLS source.
 /// <para>
 /// This build carries no H.264/HEVC/VP8/VP9/AV1/AAC/Vorbis/Opus/FLAC encoder, so a
 /// capture is pass-through remux and nothing else. There is no transcode path here and
@@ -202,7 +202,7 @@ public sealed class RecordingService : IDisposable
         }
     }
 
-    /// <summary>Starts scheduled capture from the tuner-owned shared HLS source.</summary>
+    /// <summary>Starts capture from the tuner-owned shared HLS source.</summary>
     private async Task<RecordingOutcome> StartSharedHlsCoreAsync(RecordingStartRequest request,
         CancellationToken cancellationToken)
     {
@@ -265,7 +265,7 @@ public sealed class RecordingService : IDisposable
             return await RefuseAsync(session.Id, RecordingFailure.NoDestination, "The recording service is shutting down.").ConfigureAwait(false);
 
         Interlocked.Increment(ref _active);
-        AppLogger.Info("Capture: scheduled shared-HLS start requested. id=" + session.Id + "; account=" + request.AccountId +
+        AppLogger.Info("Capture: shared-HLS start requested. id=" + session.Id + "; account=" + request.AccountId +
             "; channel=" + request.ChannelName);
 
         _ = Task.Run(() => RunSharedHlsAsync(session, space.Message, freeSpaceProbe));
@@ -525,7 +525,7 @@ public sealed class RecordingService : IDisposable
         }
     }
 
-    /// <summary>Starts recording from the tuner-owned HLS consumer without accepting or opening a second stream URL.</summary>
+    /// <summary>Starts recording from the tuner-owned HLS consumer without opening a second stream URL.</summary>
     public Task<RecordingOutcome> StartSharedHlsAsync(RecordingStartRequest request, SharedHlsConsumer consumer,
         CancellationToken cancellationToken = default)
     {
@@ -613,7 +613,7 @@ public sealed class RecordingService : IDisposable
         foreach (var session in sessions) session.Cancel();
         try { Task.WaitAll([.. sessions.Select(session => session.Finished.Task)], TimeSpan.FromSeconds(5)); }
         catch { /* Shutdown continues; every failure is already logged. */ }
-        // The semaphore is deliberately left undisposed: a scheduled start already waiting for
+        // The semaphore is deliberately left undisposed: a shared-source start already waiting for
         // a slot would surface ObjectDisposedException out of the caller's await instead
         // of a plain refusal, and the object is negligible.
     }
@@ -678,7 +678,7 @@ public sealed class RecordingService : IDisposable
             if (session.Request.SharedHlsConsumer is { } consumer)
                 await DriveSharedHlsAsync(session, verdict, consumer, freeSpaceProbe).ConfigureAwait(false);
             else
-                Fail(verdict, RecordingFailure.UnsupportedSource, "The scheduled shared HLS source is unavailable.");
+            Fail(verdict, RecordingFailure.UnsupportedSource, "The shared HLS source is unavailable.");
         }
         catch (Exception exception)
         {

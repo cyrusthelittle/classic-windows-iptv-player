@@ -9,7 +9,6 @@ using System.Reflection;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Automation;
 using System.Windows.Threading;
 using ClassicWindowsIptvPlayer.Core;
 using ClassicWindowsIptvPlayer.Windows;
@@ -51,192 +50,6 @@ internal static class Program
     {
         await WaitUntil(() => Field("_mediaPlayer") is MediaPlayer { IsPlaying: true }, "production playback did not start", TimeSpan.FromSeconds(20));
     }
-
-    private static T? FindDescendant<T>(DependencyObject rootElement, Func<T, bool> predicate) where T : DependencyObject
-    {
-        var count = System.Windows.Media.VisualTreeHelper.GetChildrenCount(rootElement);
-        for (var index = 0; index < count; index++)
-        {
-            var child = System.Windows.Media.VisualTreeHelper.GetChild(rootElement, index);
-            if (child is T match && predicate(match)) return match;
-            var nested = FindDescendant(child, predicate);
-            if (nested is not null) return nested;
-        }
-        return null;
-    }
-
-    private static Window? FindOpenWindow(string typeName) => Application.Current.Windows
-        .OfType<Window>().FirstOrDefault(item => item.GetType().Name == typeName);
-
-    private static async Task ExerciseGuideScheduleManagerFlow(Channel channel, ConfigStore store)
-    {
-        var start = DateTimeOffset.UtcNow.AddDays(2);
-        start = new DateTimeOffset(start.Year, start.Month, start.Day, start.Hour, 0, 0, TimeSpan.Zero);
-        var programme = new EpgProgramme(channel.EpgId ?? channel.Id, "UI flow scheduled fixture",
-            "Harness-created future programme", "Fixture", start, start.AddMinutes(47));
-        var guide = new EpgGuide(new Dictionary<string, IReadOnlyList<EpgProgramme>>
-        {
-            [programme.ChannelId] = [programme]
-        });
-        var scheduleCallback = (Action<Channel, EpgProgramme>)typeof(MainWindow)
-            .GetMethod("ScheduleProgramme", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .CreateDelegate(typeof(Action<Channel, EpgProgramme>), window);
-        var guideType = typeof(MainWindow).Assembly.GetType("ClassicWindowsIptvPlayer.Windows.GuideGridWindow", throwOnError: true)!;
-        var guideWindow = (Window)Activator.CreateInstance(guideType, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
-            binder: null, args: [guide, new[] { channel }, channel, channel, (Func<Channel, string?>)(_ => programme.ChannelId), 0, false, null, scheduleCallback], culture: null)!;
-        var openProgramme = guideType.GetMethod("OpenProgramme", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        var outputFolder = store.Load().RecordingFolder;
-        if (string.IsNullOrWhiteSpace(outputFolder) || !Directory.Exists(outputFolder))
-            throw new InvalidOperationException("The harness recording folder was not available to the schedule UI.");
-
-        Exception? automationFailure = null;
-        var phase = 0;
-        var sourceLimitationVisible = false;
-        RoutedEventHandler scheduleWindowLoaded = (_, args) =>
-        {
-            if (args.OriginalSource is not Window loadedWindow || automationFailure is not null) return;
-            try
-            {
-                if (phase == 0 && loadedWindow.GetType().Name == "ProgrammeDetailsWindow")
-                {
-                    phase = 1;
-                    var button = FindDescendant<Button>(loadedWindow,
-                        item => AutomationProperties.GetName(item) == "Schedule this programme")
-                        ?? throw new InvalidOperationException("Guide programme details did not render the Schedule action.");
-                    button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                }
-                else if (phase == 1 && loadedWindow is ScheduledRecordingEditorWindow editor)
-                {
-                    phase = 2;
-                    var warning = FindDescendant<TextBlock>(editor, item =>
-                        item.Text.Contains("matching live HLS channel is already playing", StringComparison.OrdinalIgnoreCase) &&
-                        item.Text.Contains("will not switch channels", StringComparison.OrdinalIgnoreCase) &&
-                        item.Text.Contains("wake the PC", StringComparison.OrdinalIgnoreCase));
-                    sourceLimitationVisible = warning is { IsVisible: true };
-                    Check(sourceLimitationVisible,
-                        "schedule editor visibly warns before saving that matching live HLS playback is required and it will not switch, open another stream, or wake the PC");
-                    var destination = (TextBox?)editor.FindName("DestinationBox")
-                        ?? throw new InvalidOperationException("Schedule editor did not expose its output path field.");
-                    destination.Text = Path.Combine(outputFolder, "ui-flow-scheduled-fixture.ts");
-                    ((ComboBox?)editor.FindName("PrePaddingBox")!).SelectedItem = 5;
-                    ((ComboBox?)editor.FindName("PostPaddingBox")!).SelectedItem = 10;
-                    ((Button?)editor.FindName("ScheduleButton"))!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                }
-            }
-            catch (Exception exception)
-            {
-                automationFailure = exception;
-                loadedWindow.Close();
-            }
-        };
-        EventManager.RegisterClassHandler(typeof(Window), FrameworkElement.LoadedEvent, scheduleWindowLoaded, handledEventsToo: true);
-        guideWindow.Owner = window;
-        guideWindow.Show();
-        try
-        {
-            openProgramme.Invoke(guideWindow, [channel, programme]);
-        }
-        finally
-        {
-            guideWindow.Close();
-        }
-        if (automationFailure is not null) throw new InvalidOperationException("The production guide-to-editor UI automation failed.", automationFailure);
-        Check(phase == 2 && sourceLimitationVisible,
-            "production guide programme details opened the real schedule editor, displayed its source limitation, and saved via its Schedule button");
-
-        var coordinator = Field("_scheduledRecordings") ?? throw new InvalidOperationException("MainWindow schedule coordinator was not initialized.");
-        var jobsProperty = coordinator.GetType().GetProperty("Jobs")!;
-        await WaitUntil(() => ((IEnumerable<ScheduledRecordingJob>)jobsProperty.GetValue(coordinator)!).Any(job => job.ProgrammeTitle == programme.Title),
-            "production schedule coordinator did not persist the guide-created job", TimeSpan.FromSeconds(10));
-        var job = ((IEnumerable<ScheduledRecordingJob>)jobsProperty.GetValue(coordinator)!).Single(item => item.ProgrammeTitle == programme.Title);
-        var reloadedIndex = store.LoadScheduledRecordingIndex(accountId);
-        var persisted = reloadedIndex?.Find(accountId, job.Id);
-        var expectedPath = Path.Combine(outputFolder, "ui-flow-scheduled-fixture.ts");
-        Check(persisted is not null && persisted.Id == job.Id && persisted.AccountId == accountId &&
-              persisted.ChannelId == channel.Id && persisted.ChannelName == channel.Name &&
-              persisted.ProgrammeTitle == programme.Title && persisted.ProgrammeStartUtc == programme.Start &&
-              persisted.ProgrammeEndUtc == programme.Stop && persisted.PrePadding == TimeSpan.FromMinutes(5) &&
-              persisted.PostPadding == TimeSpan.FromMinutes(10) &&
-              persisted.RequestedCaptureStartUtc == programme.Start.AddMinutes(-5) &&
-              persisted.RequestedCaptureEndUtc == programme.Stop.AddMinutes(10) &&
-              string.Equals(Path.GetFullPath(persisted.DestinationPath), Path.GetFullPath(expectedPath), StringComparison.OrdinalIgnoreCase) &&
-              persisted.Status == ScheduledRecordingStatus.Scheduled,
-            "guide-created schedule persists programme, channel/account, UTC window, padding, status, and selected output path");
-
-        Exception? managerFailure = null;
-        var managerSawJob = false;
-        var managerCancelledJob = false;
-        RoutedEventHandler managerLoaded = (_, args) =>
-        {
-            if (args.OriginalSource is not ScheduledRecordingsWindow manager) return;
-            manager.Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(async () =>
-            {
-                try
-                {
-                    var grid = (DataGrid?)manager.FindName("JobsGrid")
-                        ?? throw new InvalidOperationException("Schedule manager did not render its jobs grid.");
-                    ((Button?)manager.FindName("RefreshButton"))!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                    var row = grid.Items.Cast<object>().SingleOrDefault(item =>
-                        (string?)item.GetType().GetProperty("ProgrammeTitle")?.GetValue(item) == programme.Title &&
-                        (string?)item.GetType().GetProperty("ChannelName")?.GetValue(item) == channel.Name &&
-                        (string?)item.GetType().GetProperty("StatusText")?.GetValue(item) == ScheduledRecordingStatus.Scheduled.ToString());
-                    managerSawJob = row is not null;
-                    if (row is not null)
-                    {
-                        grid.SelectedItem = row;
-                        var cancelButton = (Button?)manager.FindName("CancelJobButton")
-                            ?? throw new InvalidOperationException("Schedule manager did not render its Cancel action.");
-                        Check(cancelButton.IsEnabled, "schedule manager enables Cancel for the selected scheduled job");
-                        var confirmTask = ClickYesOnNextCancelDialogAsync(TimeSpan.FromSeconds(5));
-                        cancelButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                        await confirmTask;
-                        await WaitUntil(() => ((IEnumerable<ScheduledRecordingJob>)jobsProperty.GetValue(coordinator)!)
-                            .Any(item => item.Id == job.Id && item.Status == ScheduledRecordingStatus.Cancelled),
-                            "schedule manager Cancel action did not update the persisted job state", TimeSpan.FromSeconds(5));
-                        managerCancelledJob = true;
-                    }
-                }
-                catch (Exception exception) { managerFailure = exception; }
-                finally { manager.Close(); }
-            }));
-        };
-        EventManager.RegisterClassHandler(typeof(Window), FrameworkElement.LoadedEvent, managerLoaded, handledEventsToo: true);
-        var showManager = typeof(MainWindow).GetMethod("OpenScheduledRecordings_Click", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        showManager.Invoke(window, [window, new RoutedEventArgs()]);
-        if (managerFailure is not null) throw new InvalidOperationException("The production schedule manager UI automation failed.", managerFailure);
-        Check(managerSawJob, "production schedule manager opens from MainWindow and visibly lists the persisted guide-created programme");
-        Check(managerCancelledJob && store.LoadScheduledRecordingIndex(accountId)?.Find(accountId, job.Id)?.Status == ScheduledRecordingStatus.Cancelled,
-            "user-facing schedule manager confirmation cancels the selected job and persists the cancelled state");
-    }
-
-    private static async Task ClickYesOnNextCancelDialogAsync(TimeSpan timeout)
-    {
-        var deadline = DateTime.UtcNow + timeout;
-        while (DateTime.UtcNow < deadline)
-        {
-            var dialog = FindWindow(null, "Cancel scheduled recording");
-            if (dialog != IntPtr.Zero)
-            {
-                var yes = GetDlgItem(dialog, 6); // IDYES
-                if (yes != IntPtr.Zero)
-                {
-                    SendMessage(yes, 0x00F5, IntPtr.Zero, IntPtr.Zero); // BM_CLICK
-                    return;
-                }
-            }
-            await Task.Delay(25).ConfigureAwait(false);
-        }
-        throw new TimeoutException("The schedule cancellation confirmation dialog did not appear.");
-    }
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern IntPtr FindWindow(string? className, string? windowName);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern IntPtr GetDlgItem(IntPtr dialog, int controlId);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateHardLinkW")]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -471,7 +284,6 @@ internal static class Program
             : "LIMITATION packaged LibVLC MPEG-TS transcode preflight failed; retaining the marker/WAV fixture and explicitly not claiming decoder-level HLS playback." + Environment.NewLine);
         Call("PlayChannel", channel, null);
         await WaitPlaying();
-        await Application.Current.Dispatcher.InvokeAsync(() => ExerciseGuideScheduleManagerFlow(channel, store)).Task.Unwrap();
         Check(window.FindName("RecordButton") is Button, "real production MainWindow rendered recording controls");
         Check(((Button?)window.FindName("StopRecordingButton"))?.Visibility == Visibility.Collapsed,
             "Stop recording remains hidden before capture starts");
@@ -792,29 +604,27 @@ internal static class Program
         tunerSourceField.SetValue(tuner, previousTunerSource);
         await source.DisposeAsync();
 
-        // Use the actual tuner-owned HLS source for the coordinator integration.
-        // The preceding relay decoder deliberately used a separate source, so it
-        // cannot prove the coordinator's account/channel attach path by itself.
+        // Exercise the production tuner-owned HLS source during the timeshift checks.
         tuner.Play(new TuneRequest(channel.Id, channel.Name, fixture.SharedHlsPlaylistUrl,
             "recording-ui-synthetic-hls", IsLive: true, BufferMs: 200, AccountId: accountId));
         await WaitUntil(() => tuner.CurrentPlayer is { IsPlaying: true } && tunerSourceField.GetValue(tuner) is SharedHlsSource,
-            "production tuner did not start the synthetic live HLS source for scheduled capture", TimeSpan.FromSeconds(20));
-        var scheduledPlayer = tuner.CurrentPlayer!;
-        var scheduledSource = (SharedHlsSource)tunerSourceField.GetValue(tuner)!;
-        var scheduledRunTask = sourceTaskField.GetValue(scheduledSource);
-        Check(scheduledRunTask is Task,
-            "production tuner owns a running shared-HLS poller before scheduled capture");
+            "production tuner did not start the synthetic live HLS source for timeshift checks", TimeSpan.FromSeconds(20));
+        var sharedHlsPlayer = tuner.CurrentPlayer!;
+        var sharedHlsSource = (SharedHlsSource)tunerSourceField.GetValue(tuner)!;
+        var sharedHlsPollerTask = sourceTaskField.GetValue(sharedHlsSource);
+        Check(sharedHlsPollerTask is Task,
+            "production tuner owns a running shared-HLS poller before timeshift checks");
 
         // Exercise the real production pause/resume handlers against the tuner-owned
         // HLS player. The relay should keep fetching into its timeshift buffer while
         // LibVLC is paused, without reopening the provider URL or replacing the player.
         var pausePlayer = (MediaPlayer?)Field("_mediaPlayer");
-        Check(ReferenceEquals(pausePlayer, scheduledPlayer) && pausePlayer is { IsPlaying: true },
+        Check(ReferenceEquals(pausePlayer, sharedHlsPlayer) && pausePlayer is { IsPlaying: true },
             "production MainWindow is attached to the active tuner-owned HLS MediaPlayer before pause");
         var streamRequestsBeforePause = fixture.StreamRequests;
         var pausePlaylistBaseline = fixture.SharedPlaylistRequests;
         var pauseSegmentBaseline = fixture.SharedSegmentRequests;
-        var pauseWindowBaseline = scheduledSource.InspectTimeshiftWindow();
+        var pauseWindowBaseline = sharedHlsSource.InspectTimeshiftWindow();
         Call("PauseCurrentPlayback");
         await WaitUntil(() => pausePlayer!.State == VLCState.Paused,
             $"production MediaPlayer did not enter Paused state (state={pausePlayer!.State})", TimeSpan.FromSeconds(5));
@@ -827,9 +637,9 @@ internal static class Program
         Check(ReferenceEquals(Field("_mediaPlayer"), pausePlayer) && ReferenceEquals(tuner.CurrentPlayer, pausePlayer) &&
               pausePlayer.State == VLCState.Paused,
             "production pause uses the existing MediaPlayer instance and reaches LibVLC Paused state");
-        await WaitUntil(() => scheduledSource.InspectTimeshiftWindow().LiveSequence > pauseWindowBaseline.LiveSequence,
+        await WaitUntil(() => sharedHlsSource.InspectTimeshiftWindow().LiveSequence > pauseWindowBaseline.LiveSequence,
             "shared-HLS disk buffer did not advance while the production player was paused", TimeSpan.FromSeconds(8));
-        var pauseWindowAfter = scheduledSource.InspectTimeshiftWindow();
+        var pauseWindowAfter = sharedHlsSource.InspectTimeshiftWindow();
         Check(pauseWindowAfter.BufferedBytes > 0 && pauseWindowAfter.LiveSequence > pauseWindowBaseline.LiveSequence,
             $"shared-HLS timeshift buffer advances while paused (sequence={pauseWindowBaseline.LiveSequence}->{pauseWindowAfter.LiveSequence}; bytes={pauseWindowAfter.BufferedBytes})");
         var pausedMediaTimeAfterBuffer = pausePlayer.Time;
@@ -837,7 +647,7 @@ internal static class Program
             $"INFO live-HLS player position after buffer advanced while paused: timeMs={pausedMediaTimeAfterBuffer}; lengthMs={pausePlayer.Length}; position={pausePlayer.Position}; seekable={pausePlayer.IsSeekable}.{Environment.NewLine}");
         Check(fixture.SharedPlaylistRequests > pausePlaylistBaseline && fixture.SharedSegmentRequests > pauseSegmentBaseline &&
               fixture.StreamRequests == streamRequestsBeforePause &&
-              ReferenceEquals(sourceTaskField.GetValue(scheduledSource), scheduledRunTask) &&
+              ReferenceEquals(sourceTaskField.GetValue(sharedHlsSource), sharedHlsPollerTask) &&
               fixture.SharedSegmentRequests == fixture.SharedSegmentFetches.Values.Sum() &&
               fixture.SharedSegmentFetches.Values.All(count => count == 1),
             "paused HLS playback keeps one existing shared poller/fetcher and starts no second provider-stream response");
@@ -853,11 +663,11 @@ internal static class Program
             "explicit SetPause(false) resumes the same production MediaPlayer instance");
         Check(fixture.StreamRequests == streamRequestsBeforePause &&
               fixture.SharedSegmentRequests >= pauseResumeSegmentCount &&
-              ReferenceEquals(sourceTaskField.GetValue(scheduledSource), scheduledRunTask),
-            $"resume adds no new direct provider-stream request or poller and preserves the original source task (direct={fixture.StreamRequests}/{streamRequestsBeforePause}; sourceTaskSame={ReferenceEquals(sourceTaskField.GetValue(scheduledSource), scheduledRunTask)})");
+              ReferenceEquals(sourceTaskField.GetValue(sharedHlsSource), sharedHlsPollerTask),
+            $"resume adds no new direct provider-stream request or poller and preserves the original source task (direct={fixture.StreamRequests}/{streamRequestsBeforePause}; sourceTaskSame={ReferenceEquals(sourceTaskField.GetValue(sharedHlsSource), sharedHlsPollerTask)})");
 
-        var rewindWindow = scheduledSource.InspectTimeshiftWindow();
-        var rewindPoller = sourceTaskField.GetValue(scheduledSource);
+        var rewindWindow = sharedHlsSource.InspectTimeshiftWindow();
+        var rewindPoller = sourceTaskField.GetValue(sharedHlsSource);
         var rewindPlayer = tuner.CurrentPlayer;
         var rewindDirectRequests = fixture.StreamRequests;
         Media? notifiedReplacement = null;
@@ -871,17 +681,17 @@ internal static class Program
         Check(rewind.Success && rewind.SelectedSequence is long selectedOldSequence && selectedOldSequence < rewindWindow.LiveSequence,
             $"production tuner accepts an explicit buffered rewind to an older segment (selected={rewind.SelectedSequence}; edge={rewindWindow.LiveSequence}; reason={rewind.FailureReason})");
         if (rewind.SelectedSequence is long requestedOldSequence)
-            await WaitUntil(() => scheduledSource.GetLocalPlaybackSegmentRequestCount(requestedOldSequence) > 0,
+            await WaitUntil(() => sharedHlsSource.GetLocalPlaybackSegmentRequestCount(requestedOldSequence) > 0,
                 $"LibVLC did not request selected buffered segment {requestedOldSequence}", TimeSpan.FromSeconds(8));
         Check(ReferenceEquals(tuner.CurrentPlayer, rewindPlayer) && rewindPlayer is { IsPlaying: true } &&
-              rewind.SelectedSequence is long decodedSequence && scheduledSource.GetLocalPlaybackSegmentRequestCount(decodedSequence) > 0,
+              rewind.SelectedSequence is long decodedSequence && sharedHlsSource.GetLocalPlaybackSegmentRequestCount(decodedSequence) > 0,
             $"selected buffered HLS input is actively playing on the same production MediaPlayer and its old segment was requested locally (state={rewindPlayer?.State}; sequence={rewind.SelectedSequence})");
         Check(notifiedReplacement is not null && ReferenceEquals(tuner.GetType().GetField("_activeMedia", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(tuner), notifiedReplacement),
             "ActiveMediaChanged publishes the replacement Media synchronously before the prior Media is retired");
         Check(ReferenceEquals(Field("_currentMedia"), notifiedReplacement) && ReferenceEquals(Field("_mediaPlayer"), rewindPlayer),
             "MainWindow receives the active Media handoff before the previous Media is retired without replacing its player");
-        Check(ReferenceEquals(tunerSourceField.GetValue(tuner), scheduledSource) &&
-              ReferenceEquals(sourceTaskField.GetValue(scheduledSource), rewindPoller) && fixture.StreamRequests == rewindDirectRequests &&
+        Check(ReferenceEquals(tunerSourceField.GetValue(tuner), sharedHlsSource) &&
+              ReferenceEquals(sourceTaskField.GetValue(sharedHlsSource), rewindPoller) && fixture.StreamRequests == rewindDirectRequests &&
               fixture.SharedSegmentRequests == fixture.SharedSegmentFetches.Values.Sum() &&
               fixture.SharedSegmentFetches.Values.All(count => count == 1),
             "rewind retains one shared source/poller and performs no duplicate/direct provider request");
@@ -889,67 +699,10 @@ internal static class Program
         Check(liveReturn.Success && liveReturn.SelectedSequence is long returnedLiveSequence &&
               rewind.SelectedSequence is long rewoundSequence && returnedLiveSequence >= rewoundSequence &&
               ReferenceEquals(tuner.CurrentPlayer, rewindPlayer) && rewindPlayer is { IsPlaying: true } &&
-              ReferenceEquals(tunerSourceField.GetValue(tuner), scheduledSource) &&
-              ReferenceEquals(sourceTaskField.GetValue(scheduledSource), rewindPoller),
+              ReferenceEquals(tunerSourceField.GetValue(tuner), sharedHlsSource) &&
+              ReferenceEquals(sourceTaskField.GetValue(sharedHlsSource), rewindPoller),
             $"return-to-live switches the same player to the latest buffered edge (sequence={liveReturn.SelectedSequence}; reason={liveReturn.FailureReason})");
         tuner.ActiveMediaChanged -= OnActiveMediaChanged;
-
-        var scheduledPlaylistBaseline = fixture.SharedPlaylistRequests;
-        var scheduledSegmentBaseline = fixture.SharedSegmentRequests;
-        var scheduledStartUtc = DateTimeOffset.UtcNow;
-        var scheduledEndUtc = scheduledStartUtc.AddSeconds(4);
-        var scheduledPath = Path.Combine(root, "scheduled-coordinator-fixture.ts");
-        using (var coordinator = new ScheduledRecordingCoordinator(accountId, store, tuner, (RecordingService)service))
-        {
-            var job = new ScheduledRecordingJob
-            {
-                Id = "ui-harness-scheduled-" + Guid.NewGuid().ToString("N"),
-                AccountId = accountId,
-                ChannelId = channel.Id,
-                ChannelName = channel.Name,
-                ProgrammeTitle = "Synthetic scheduled fixture",
-                ProgrammeStartUtc = scheduledStartUtc,
-                ProgrammeEndUtc = scheduledEndUtc,
-                PrePadding = TimeSpan.Zero,
-                PostPadding = TimeSpan.Zero,
-                RequestedCaptureStartUtc = scheduledStartUtc,
-                RequestedCaptureEndUtc = scheduledEndUtc,
-                DestinationPath = scheduledPath
-            };
-            await coordinator.AddAsync(job);
-            await coordinator.ProcessDueAsync(scheduledStartUtc);
-            await WaitUntil(() => coordinator.Jobs.Single(item => item.Id == job.Id).Status == ScheduledRecordingStatus.Recording,
-                "scheduled coordinator did not attach and reach Recording on the active synthetic HLS stream", TimeSpan.FromSeconds(12));
-            var recordingJob = coordinator.Jobs.Single(item => item.Id == job.Id);
-            Check(!string.IsNullOrWhiteSpace(recordingJob.RecordingId),
-                "scheduled coordinator records the production RecordingService session ID");
-            Check(ReferenceEquals(tuner.CurrentPlayer, scheduledPlayer) && scheduledPlayer.IsPlaying &&
-                  ReferenceEquals(tunerSourceField.GetValue(tuner), scheduledSource) &&
-                  ReferenceEquals(sourceTaskField.GetValue(scheduledSource), scheduledRunTask),
-                "scheduled attachment preserves the active tuner player, shared source, and original poller");
-            await WaitUntil(() => File.Exists(scheduledPath) && new FileInfo(scheduledPath).Length > 0,
-                "scheduled coordinator capture did not write any HLS segment bytes", TimeSpan.FromSeconds(12));
-            Check(fixture.SharedPlaylistRequests > scheduledPlaylistBaseline &&
-                  fixture.SharedSegmentRequests > scheduledSegmentBaseline &&
-                  fixture.SharedSegmentRequests == fixture.SharedSegmentFetches.Values.Sum() &&
-                  fixture.SharedSegmentFetches.Values.All(count => count == 1),
-                "scheduled attachment uses the existing upstream poller and each synthetic HLS segment is fetched once");
-            var untilEnd = scheduledEndUtc - DateTimeOffset.UtcNow;
-            if (untilEnd > TimeSpan.Zero) await Task.Delay(untilEnd);
-            await coordinator.ProcessDueAsync(scheduledEndUtc);
-            var completedJob = coordinator.Jobs.Single(item => item.Id == job.Id);
-            Check(completedJob.Status == ScheduledRecordingStatus.Completed,
-                $"scheduled coordinator marks the job Completed at its requested end (status={completedJob.Status}; reason={completedJob.Reason})");
-            var finalSize = File.Exists(scheduledPath) ? new FileInfo(scheduledPath).Length : 0;
-            var finalSnapshot = service.GetType().GetMethod("Find")!.Invoke(service, [completedJob.RecordingId!]);
-            var reportedSize = (long?)finalSnapshot?.GetType().GetProperty("ByteSize")?.GetValue(finalSnapshot);
-            Check(finalSize > 0 && reportedSize == finalSize,
-                $"scheduled completion flushes the playable file before returning (file={finalSize}; service={reportedSize})");
-            Check(ReferenceEquals(tuner.CurrentPlayer, scheduledPlayer) && scheduledPlayer.IsPlaying &&
-                  ReferenceEquals(tunerSourceField.GetValue(tuner), scheduledSource) &&
-                  ReferenceEquals(sourceTaskField.GetValue(scheduledSource), scheduledRunTask),
-                "scheduled completion leaves the same tuner player and single HLS poller active");
-        }
 
         // Exercise the non-HLS route through the production tuner and capture
         // service. The callbacks must retune the one input instead of opening a

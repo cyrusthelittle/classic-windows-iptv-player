@@ -15,7 +15,7 @@ public sealed class ConfigStore
 {
     private const string ProtectedHeader = "CIPTV2\n";
     private const string RecordingIndexPrefix = "recordings-";
-    private const string ScheduledRecordingIndexPrefix = "scheduled-recordings-";
+    private const string RetiredScheduledRecordingIndexPrefix = "scheduled-recordings-";
     private static readonly byte[] Entropy = Encoding.UTF8.GetBytes("ClassicWindowsIptvPlayer local data v2");
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true, PropertyNameCaseInsensitive = true };
     private readonly string _appFolder;
@@ -140,50 +140,6 @@ public sealed class ConfigStore
         AtomicWrite(GetRecordingIndexPath(accountId), Protect(output.ToArray()));
     }
 
-    public ScheduledRecordingIndex? LoadScheduledRecordingIndex(string accountId)
-    {
-        var path = GetScheduledRecordingIndexPath(accountId);
-        if (!File.Exists(path) && !File.Exists(path + ".bak")) return null;
-        var bytes = ReadRecoverable(path, ValidateScheduledRecordingIndex);
-        using var input = new MemoryStream(Unprotect(bytes));
-        using var gzip = new GZipStream(input, CompressionMode.Decompress);
-        var index = JsonSerializer.Deserialize<ScheduledRecordingIndex>(gzip, JsonOptions)
-            ?? throw new InvalidDataException("The scheduled recordings index is empty.");
-        if (index.Version > ScheduledRecordingIndex.CurrentVersion)
-            throw new InvalidDataException("The scheduled recordings index was written by a newer app version.");
-        if (index.Jobs.Any(job => !string.Equals(job.AccountId, accountId, StringComparison.OrdinalIgnoreCase)))
-            throw new InvalidDataException("The scheduled recordings index contains a job for a different account.");
-        index.Normalize();
-        return index;
-    }
-
-    public void SaveScheduledRecordingIndex(string accountId, ScheduledRecordingIndex index)
-    {
-        if (string.IsNullOrWhiteSpace(accountId)) throw new ArgumentException("An account ID is required.", nameof(accountId));
-        if (index.Jobs.Any(job => !ScheduledRecordingPolicy.Validate(job).IsValid))
-            throw new InvalidDataException("The scheduled recordings index contains an invalid job.");
-        if (index.Jobs.Any(job => !string.Equals(job.AccountId, accountId, StringComparison.OrdinalIgnoreCase)))
-            throw new InvalidDataException("The scheduled recordings index contains a job for a different account.");
-        index.Version = ScheduledRecordingIndex.CurrentVersion;
-        index.Normalize();
-        using var output = new MemoryStream();
-        using (var gzip = new GZipStream(output, CompressionLevel.Fastest, leaveOpen: true))
-            JsonSerializer.Serialize(gzip, index, JsonOptions);
-        AtomicWrite(GetScheduledRecordingIndexPath(accountId), Protect(output.ToArray()));
-    }
-
-    private static bool ValidateScheduledRecordingIndex(byte[] bytes)
-    {
-        using var input = new MemoryStream(Unprotect(bytes));
-        using var gzip = new GZipStream(input, CompressionMode.Decompress);
-        var index = JsonSerializer.Deserialize<ScheduledRecordingIndex>(gzip, JsonOptions);
-        return index is not null && index.Version > 0 && index.Jobs is not null &&
-            index.Jobs.All(job => ScheduledRecordingPolicy.Validate(job).IsValid);
-    }
-
-    public string GetScheduledRecordingIndexPath(string accountId) =>
-        Path.Combine(_appFolder, ScheduledRecordingIndexPrefix + SanitizeAccountId(accountId) + ".json.gz");
-
     // Structural validation only. A version from a newer build is reported by the
     // caller with its own message rather than being treated as a damaged file.
     private static bool ValidateRecordingIndex(byte[] bytes)
@@ -192,6 +148,18 @@ public sealed class ConfigStore
         using var gzip = new GZipStream(input, CompressionMode.Decompress);
         var index = JsonSerializer.Deserialize<RecordingIndex>(gzip, JsonOptions);
         return index is not null && index.Version > 0 && index.Entries is not null;
+    }
+
+    // Preserve old scheduled-recording files in backups for backward compatibility.
+    // The app no longer reads or writes these retired index files.
+    private static bool ValidateRetiredScheduledRecordingIndex(byte[] bytes)
+    {
+        using var input = new MemoryStream(Unprotect(bytes));
+        using var gzip = new GZipStream(input, CompressionMode.Decompress);
+        using var document = JsonDocument.Parse(gzip);
+        return document.RootElement.ValueKind == JsonValueKind.Object &&
+            document.RootElement.TryGetProperty("Version", out var version) && version.TryGetInt32(out var value) && value > 0 &&
+            document.RootElement.TryGetProperty("Jobs", out var jobs) && jobs.ValueKind == JsonValueKind.Array;
     }
 
     // A capture cannot survive the app closing, so a row that is still marked as
@@ -350,7 +318,7 @@ public sealed class ConfigStore
             if (name == "channels.json.gz" || name.StartsWith("channels-", StringComparison.Ordinal) ||
                 name.StartsWith("guide-", StringComparison.Ordinal) ||
                 name.StartsWith(RecordingIndexPrefix, StringComparison.Ordinal) ||
-                name.StartsWith(ScheduledRecordingIndexPrefix, StringComparison.Ordinal))
+                name.StartsWith(RetiredScheduledRecordingIndexPrefix, StringComparison.Ordinal))
                 yield return path;
         }
     }
@@ -390,9 +358,9 @@ public sealed class ConfigStore
             {
                 if (!ValidateRecordingIndex(item.Value)) throw new InvalidDataException("Backup recordings index is invalid.");
             }
-            else if (item.Key.StartsWith("cache/" + ScheduledRecordingIndexPrefix, StringComparison.Ordinal))
+            else if (item.Key.StartsWith("cache/" + RetiredScheduledRecordingIndexPrefix, StringComparison.Ordinal))
             {
-                if (!ValidateScheduledRecordingIndex(item.Value)) throw new InvalidDataException("Backup scheduled recordings index is invalid.");
+                if (!ValidateRetiredScheduledRecordingIndex(item.Value)) throw new InvalidDataException("Backup contains an invalid retired scheduled-recordings file.");
             }
             else throw new InvalidDataException("Backup contains an unknown cache file.");
         }

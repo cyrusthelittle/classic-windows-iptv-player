@@ -21,10 +21,9 @@ var organizationResult = OrganizationRegressionChecks.Run();
 var catchupResult = await CatchupRegressionChecks.RunAsync();
 var recordingResult = RecordingRegressionChecks.Run();
 var sharedHlsResult = SharedHlsSourceRegressionChecks.Run();
-var scheduledRecordingResult = ScheduledRecordingRegressionChecks.Run();
 var feedbackOutboxResult = await FeedbackOutboxRegressionChecks.RunAsync();
 var crashSessionMarkerResult = CrashSessionMarkerRegressionChecks.Run();
-return epgResult == 0 && tunerResult == 0 && diagnosticsResult == 0 && playbackBrowseResult == 0 && storageResult == 0 && accountEditingResult == 0 && providerResult == 0 && playbackMechanicsResult == 0 && libraryNavigationResult == 0 && largeLibraryResult == 0 && guideFoundationResult == 0 && guideGridResult == 0 && viewingHistoryResult == 0 && playbackPreferenceResult == 0 && videoOwnershipResult == 0 && organizationResult == 0 && catchupResult == 0 && recordingResult == 0 && sharedHlsResult == 0 && scheduledRecordingResult == 0 && feedbackOutboxResult == 0 && crashSessionMarkerResult == 0 ? 0 : 1;
+return epgResult == 0 && tunerResult == 0 && diagnosticsResult == 0 && playbackBrowseResult == 0 && storageResult == 0 && accountEditingResult == 0 && providerResult == 0 && playbackMechanicsResult == 0 && libraryNavigationResult == 0 && largeLibraryResult == 0 && guideFoundationResult == 0 && guideGridResult == 0 && viewingHistoryResult == 0 && playbackPreferenceResult == 0 && videoOwnershipResult == 0 && organizationResult == 0 && catchupResult == 0 && recordingResult == 0 && sharedHlsResult == 0 && feedbackOutboxResult == 0 && crashSessionMarkerResult == 0 ? 0 : 1;
 
 internal static class EpgRegressionChecks
 {

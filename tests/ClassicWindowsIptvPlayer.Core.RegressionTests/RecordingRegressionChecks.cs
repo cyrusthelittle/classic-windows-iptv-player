@@ -136,7 +136,7 @@ internal static class RecordingRegressionChecks
     {
         var budget = new ConnectionBudget();
         var first = budget.Acquire(Profile("4", "2"), StreamLeaseKind.InstantRecording, "First");
-        var second = budget.Acquire(Profile("4", "2"), StreamLeaseKind.ScheduledRecording, "Second");
+        var second = budget.Acquire(Profile("4", "2"), StreamLeaseKind.InstantRecording, "Second");
         Check(first is not null && second is not null, "the first two local streams were refused");
         Equal(2, budget.LocalHeld);
         Equal(true, budget.Release(first));
@@ -231,8 +231,8 @@ internal static class RecordingRegressionChecks
         // Every other consumer draws from the same allowance.
         var multi = new ConnectionBudget();
         Check(multi.Acquire(Profile("3", "0"), StreamLeaseKind.MultiView, "Multi view") is not null, "multi view did not fit");
-        foreach (var kind in new[] { StreamLeaseKind.ScheduledRecording, StreamLeaseKind.TimeshiftBuffer })
-            Check(new ConnectionBudget().Acquire(Profile("3", "0"), kind, kind.ToString()) is not null, kind + " did not fit a three stream allowance");
+        Check(new ConnectionBudget().Acquire(Profile("3", "0"), StreamLeaseKind.TimeshiftBuffer, "Timeshift buffer") is not null,
+            "timeshift buffer did not fit a three stream allowance");
         Equal(1, budget.ReleaseWhere(lease => lease.Kind == StreamLeaseKind.InstantRecording));
         Equal(1, budget.LocalHeld);
         // A capture that throws must still give its slot back.

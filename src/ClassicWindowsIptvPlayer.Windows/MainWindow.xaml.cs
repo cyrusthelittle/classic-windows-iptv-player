@@ -313,7 +313,6 @@ public partial class MainWindow : Window
         _searchTimer.Tick += (_, _) => { _searchTimer.Stop(); ApplyFilters(); };
 
         _positionTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
-        _scheduledRecordingTimer.Tick += ScheduledRecordingTimer_Tick;
         _positionTimer.Tick += (_, _) =>
         {
             UpdatePlaybackPosition();
@@ -363,9 +362,6 @@ public partial class MainWindow : Window
                 return;
             }
             _isShuttingDown = true;
-            _scheduledRecordingTimer.Stop();
-            _scheduledRecordings?.Dispose();
-            _scheduledRecordings = null;
             _recordingService?.Dispose();
             _recordingService = null;
             _feedbackOutbox.Dispose();
@@ -473,9 +469,6 @@ public partial class MainWindow : Window
 
     private void InitializeRecordingService()
     {
-        _scheduledRecordingTimer.Stop();
-        _scheduledRecordings?.Dispose();
-        _scheduledRecordings = null;
         _recordingService?.Dispose();
         SaveRecordingIndex(_state.SelectedAccountId);
         _recordingProfile = null;
@@ -526,7 +519,6 @@ public partial class MainWindow : Window
         };
         UpdateRecordingControls();
         UpdateRecentRecordingButton();
-        InitializeScheduledRecordingCoordinator();
     }
 
     private void SaveRecordingIndex(string accountId)
@@ -584,7 +576,7 @@ public partial class MainWindow : Window
     {
         using var dialog = new System.Windows.Forms.FolderBrowserDialog
         {
-            Description = "Choose where instant and scheduled recordings are saved by default.",
+            Description = "Choose where recordings are saved by default.",
             ShowNewFolderButton = true,
             SelectedPath = System.IO.Directory.Exists(GetRecordingFolder()) ? GetRecordingFolder() : Environment.GetFolderPath(Environment.SpecialFolder.MyVideos)
         };
@@ -945,50 +937,40 @@ public partial class MainWindow : Window
         ShowAccountLoading(updatePlaylist
             ? "Connecting to your provider and updating the playlist..."
             : "Loading your saved playlist...");
+        List<Channel> saved = updatePlaylist && _sourceChannels.Count > 0 ? _sourceChannels : [];
+        var savedLoaded = saved.Count > 0;
 
         try
         {
             StatusText.Text = updatePlaylist ? "Updating playlist..." : "Loading cached playlist...";
-            var saved = await Task.Run(() => _store.LoadChannelCache(accountId), cts.Token);
             if (!IsCurrentLoad()) return;
-            if (_store.RecoveryNotice is { } recoveryNotice)
-                MessageBox.Show(this, recoveryNotice, "Saved library recovery", MessageBoxButton.OK, MessageBoxImage.Information);
-            if (saved.Count > 0)
-            {
-                _sourceChannels = saved;
-                _channels = await Task.Run(() => LibraryOrganization.Apply(saved, _state.SelectedLibrary), cts.Token);
-                _searchIndex = await Task.Run(() => new MediaSearchIndex(_channels), cts.Token);
-                if (!IsCurrentLoad()) return;
-                await ApplyFiltersAsync();
-                if (_state.EpgEnabled)
-                {
-                    try
-                    {
-                        var cachedGuide = await Task.Run(() => _store.LoadGuideCache(accountId), cts.Token);
-                        if (!IsCurrentLoad()) return;
-                        if (cachedGuide is not null)
-                        {
-                            _epgGuide = EpgGuide.FromSnapshot(cachedGuide);
-                            _epgFetchedAt = cachedGuide.FetchedAt;
-                            UpdateEpgDisplay();
-                        }
-                    }
-                    catch (Exception ex) { AppLogger.Warn("Saved guide unavailable. " + AppLogger.SanitizeText(ex.Message)); }
-                }
-            }
+            // A refresh already has to hold the newly parsed provider catalog in
+            // memory. Defer inflating the previous cache until we know it is needed
+            // as a fallback; otherwise a large saved catalog and a large new catalog
+            // overlap during every successful account refresh.
+            if (!updatePlaylist) await DisplaySavedLibraryAsync();
             if (updatePlaylist || saved.Count == 0)
             {
                 var account = _state.Account.Clone();
                 var progress = new Progress<string>(stage => { if (IsCurrentLoad()) SetAccountLoadingMessage(stage); });
                 var result = await _playlistService.LoadPlaylistResultAsync(account, cts.Token, progress);
                 if (!IsCurrentLoad()) return;
+                if (updatePlaylist && !savedLoaded) await EnsureSavedLibraryLoadedAsync();
                 var missingSavedKind = saved.Select(item => item.MediaKind).Distinct()
                     .Any(kind => !result.Channels.Any(item => item.MediaKind == kind));
                 if ((result.IsPartial || missingSavedKind) && saved.Count > 0)
                 {
+                    await DisplaySavedLibraryAsync();
                     StatusText.Text = (missingSavedKind ? "Provider omitted a saved media category." : result.Message) +
                                       " Using saved library. Retry from Playlist menu.";
                     return;
+                }
+                // The old cache was needed only to compare media categories. Let it
+                // go before creating the new organized view and search index.
+                if (updatePlaylist)
+                {
+                    saved = [];
+                    savedLoaded = false; // Reload from disk if preparing the replacement fails.
                 }
                 SetAccountLoadingMessage($"Preparing {result.Channels.Count:N0} playlist items...");
                 var replacement = result.Channels.ToList();
@@ -1037,6 +1019,14 @@ public partial class MainWindow : Window
         {
             if (!IsCurrentLoad()) return;
             AppLogger.Error("Library load failed.", ex);
+            if (updatePlaylist)
+            {
+                try { await DisplaySavedLibraryAsync(); }
+                catch (Exception cacheException)
+                {
+                    AppLogger.Warn("Saved library fallback unavailable. " + AppLogger.SanitizeText(cacheException.Message));
+                }
+            }
             StatusText.Text = _channels.Count > 0 ? "Provider failed. Using saved library. Retry from Playlist menu." : "Provider failed. Retry from Playlist menu.";
             SetAccountLoadingMessage("Provider unavailable: " + AppLogger.SanitizeText(ex.Message));
         }
@@ -1049,6 +1039,42 @@ public partial class MainWindow : Window
             }
             cts.Dispose();
         }
+        async Task EnsureSavedLibraryLoadedAsync()
+        {
+            if (savedLoaded) return;
+            saved = await Task.Run(() => _store.LoadChannelCache(accountId), cts.Token);
+            savedLoaded = true;
+            if (_store.RecoveryNotice is { } recoveryNotice)
+                MessageBox.Show(this, recoveryNotice, "Saved library recovery", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+
+        async Task DisplaySavedLibraryAsync()
+        {
+            if (_sourceChannels.Count > 0 && _channels.Count > 0) return;
+            await EnsureSavedLibraryLoadedAsync();
+            if (saved.Count == 0) return;
+            _sourceChannels = saved;
+            _channels = await Task.Run(() => LibraryOrganization.Apply(saved, _state.SelectedLibrary), cts.Token);
+            _searchIndex = await Task.Run(() => new MediaSearchIndex(_channels), cts.Token);
+            if (!IsCurrentLoad()) return;
+            await ApplyFiltersAsync();
+            if (_state.EpgEnabled)
+            {
+                try
+                {
+                    var cachedGuide = await Task.Run(() => _store.LoadGuideCache(accountId), cts.Token);
+                    if (!IsCurrentLoad()) return;
+                    if (cachedGuide is not null)
+                    {
+                        _epgGuide = EpgGuide.FromSnapshot(cachedGuide);
+                        _epgFetchedAt = cachedGuide.FetchedAt;
+                        UpdateEpgDisplay();
+                    }
+                }
+                catch (Exception ex) { AppLogger.Warn("Saved guide unavailable. " + AppLogger.SanitizeText(ex.Message)); }
+            }
+        }
+
         bool IsCurrentLoad() => generation == _libraryLoadGeneration && accountId == _state.SelectedAccountId && !cts.IsCancellationRequested;
     }
 
@@ -3661,8 +3687,7 @@ public partial class MainWindow : Window
             DateTimeOffset.UtcNow - _epgFetchedAt.Value >= GuideRefreshInterval;
         new GuideGridWindow(guide, _channels, _playbackState.SelectedChannel, _currentChannel,
             channel => library.GuideMappings.GetValueOrDefault(ItemIdentity.For(channel)),
-            library.GuideOffsetMinutes, stale, (channel, programme) => _ = StartCatchupAsync(channel, programme),
-            (channel, programme) => ScheduleProgramme(channel, programme)) { Owner = this }.ShowDialog();
+            library.GuideOffsetMinutes, stale, (channel, programme) => _ = StartCatchupAsync(channel, programme)) { Owner = this }.ShowDialog();
     }
 
     private async void GuideMap_Click(object sender, RoutedEventArgs e)
@@ -3964,9 +3989,6 @@ public partial class MainWindow : Window
             _multiViewWindow = null;
             StopPlayback();
             await StopRecordingsSafelyAsync(RecordingStopReason.Restarted);
-            _scheduledRecordingTimer.Stop();
-            _scheduledRecordings?.Dispose();
-            _scheduledRecordings = null;
             _recordingService?.Dispose();
             SaveRecordingIndex(_state.SelectedAccountId);
             _activeRecordingId = null;

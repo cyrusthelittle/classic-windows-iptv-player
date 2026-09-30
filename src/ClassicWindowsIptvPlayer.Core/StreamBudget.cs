@@ -6,9 +6,8 @@ public enum StreamLeaseKind
 {
     LivePlayback = 0,
     InstantRecording,
-    ScheduledRecording,
-    TimeshiftBuffer,
-    MultiView
+    TimeshiftBuffer = 3,
+    MultiView = 4
 }
 
 public enum ConnectionBudgetStatus
@@ -33,7 +32,7 @@ public sealed record ConnectionBudgetDecision(bool IsAllowed, ConnectionBudgetSt
 
 /// <summary>
 /// Local, honest accounting of the streams this application currently holds. Playback,
-/// instant recording, scheduled recording, the timeshift buffer and later multi-view all
+/// instant recording, the timeshift buffer and multi-view all
 /// consume a provider connection, so the budget is asked before a capture is opened rather
 /// than discovering the limit as a provider error. This type performs no I/O, starts no
 /// decoder and is safe to exercise in the regression runner.

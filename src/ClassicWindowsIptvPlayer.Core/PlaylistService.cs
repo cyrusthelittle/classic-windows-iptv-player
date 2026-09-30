@@ -50,9 +50,6 @@ public sealed class PlaylistService
 
     public async Task<LoadResult> LoadPlaylistResultAsync(AccountSettings account, CancellationToken cancellationToken, IProgress<string>? progress = null)
     {
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        deadline.CancelAfter(TimeSpan.FromMinutes(2));
-        cancellationToken = deadline.Token;
         progress?.Report("Downloading playlist...");
         var playlistUrl = BuildPlaylistUrl(account);
         var xtreamAccount = TryResolveXtreamAccount(account);
@@ -61,9 +58,25 @@ public sealed class PlaylistService
         Exception m3uFailure;
         try
         {
-            using var response = await _httpClient.GetAsync(playlistUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            AppLogger.Info("Playlist HTTP response. status=" + (int)response.StatusCode + " " + response.ReasonPhrase);
-            response.EnsureSuccessStatusCode();
+            // Download the complete M3U to a short lived local file before doing
+            // any catalog work. Large providers can take several minutes to send
+            // their exports, and holding an unread HTTP response open while Xtream
+            // catalogs load can cause the provider to close the connection. The
+            // file is deleted automatically when its handle closes, including on
+            // normal cancellation or exceptions.
+            var tempPath = Path.Combine(Path.GetTempPath(), "cyrus-iptv-" + Guid.NewGuid().ToString("N") + ".m3u");
+            await using var playlistFile = new FileStream(tempPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None,
+                128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan | FileOptions.DeleteOnClose);
+            var downloadTimer = Stopwatch.StartNew();
+            using (var response = await _httpClient.GetAsync(playlistUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken))
+            {
+                AppLogger.Info("Playlist HTTP response. status=" + (int)response.StatusCode + " " + response.ReasonPhrase);
+                response.EnsureSuccessStatusCode();
+                await response.Content.CopyToAsync(playlistFile, cancellationToken).ConfigureAwait(false);
+            }
+            await playlistFile.FlushAsync(cancellationToken).ConfigureAwait(false);
+            downloadTimer.Stop();
+            AppLogger.Info($"Playlist downloaded to temporary file. bytes={playlistFile.Length} elapsedMs={downloadTimer.ElapsedMilliseconds}");
 
             progress?.Report("Checking provider media types...");
             var total = Stopwatch.StartNew();
@@ -74,10 +87,10 @@ public sealed class PlaylistService
             catalogTimer.Stop();
             AppLogger.Info($"Xtream media kind map loaded. count={bootstrap.Kinds.Count} elapsedMs={catalogTimer.ElapsedMilliseconds}");
 
-            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            playlistFile.Position = 0;
             progress?.Report("Reading playlist items...");
             var parseTimer = Stopwatch.StartNew();
-            var channels = await ParseM3uFromStreamAsync(stream, bootstrap.Kinds, cancellationToken, bootstrap.Archives);
+            var channels = await ParseM3uFromStreamAsync(playlistFile, bootstrap.Kinds, cancellationToken, bootstrap.Archives);
             parseTimer.Stop();
             AppLogger.Info($"Playlist parsed. channels={channels.Count} elapsedMs={parseTimer.ElapsedMilliseconds}");
             if (channels.Count > 0)
@@ -93,7 +106,7 @@ public sealed class PlaylistService
 
             m3uFailure = new InvalidOperationException("Playlist was downloaded but no playable channels were found.");
         }
-        catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException)
+        catch (Exception ex) when (ex is HttpRequestException or IOException or InvalidOperationException)
         {
             m3uFailure = ex;
         }
