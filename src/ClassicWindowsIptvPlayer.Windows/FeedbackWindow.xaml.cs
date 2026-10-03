@@ -7,11 +7,12 @@ public partial class FeedbackWindow : Window
     private readonly Func<string, bool, Task<FeedbackDeliveryResult>> _send;
     private bool _sending;
 
-    public FeedbackWindow(Func<string, bool, Task<FeedbackDeliveryResult>> send, string? initialMessage = null)
+    public FeedbackWindow(Func<string, bool, Task<FeedbackDeliveryResult>> send, string? initialMessage = null, bool includeLogs = true)
     {
         InitializeComponent();
         _send = send ?? throw new ArgumentNullException(nameof(send));
         MessageBox.Text = initialMessage ?? string.Empty;
+        IncludeLogsCheckBox.IsChecked = includeLogs;
     }
 
     private async void Send_Click(object sender, RoutedEventArgs e)

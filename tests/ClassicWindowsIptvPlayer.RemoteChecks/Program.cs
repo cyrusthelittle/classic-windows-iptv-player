@@ -50,6 +50,7 @@ internal static class Program
     [STAThread]
     static void Main(string[] args)
     {
+        Environment.SetEnvironmentVariable("CYRUS_IPTV_DATA_ROOT", AppContext.BaseDirectory);
         var interactive = args.Contains("--interactive");
         if (!args.Contains("--child"))
         {

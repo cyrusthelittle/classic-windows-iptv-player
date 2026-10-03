@@ -65,6 +65,7 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        Environment.SetEnvironmentVariable("CYRUS_IPTV_DATA_ROOT", AppContext.BaseDirectory);
         if (!args.Contains("--child", StringComparer.Ordinal))
         {
             root = Path.Combine(Path.GetTempPath(), "cyrus-recording-ui-" + Guid.NewGuid().ToString("N"));

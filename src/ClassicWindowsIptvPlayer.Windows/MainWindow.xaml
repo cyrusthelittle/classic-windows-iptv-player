@@ -55,6 +55,7 @@
             </MenuItem>
             <MenuItem x:Name="SubtitleMenu" Header="Subtitles" />
             <MenuItem Header="Settings" SubmenuOpened="SettingsMenu_Opened">
+                <MenuItem x:Name="BackgroundPlaylistRefreshMenuItem" Header="Update playlist in the background every time I open this account" IsCheckable="True" Click="ToggleBackgroundPlaylistRefresh_Click" />
                 <MenuItem Header="Recording folder..." Click="ChooseRecordingFolder_Click" />
                 <MenuItem Header="Feedback endpoint..." Click="FeedbackEndpoint_Click" />
                 <Separator />
@@ -73,6 +74,7 @@
                     <MenuItem x:Name="DarkModeMenuItem" Header="Dark mode" IsCheckable="True" Click="ToggleDarkMode_Click" />
                     <MenuItem x:Name="EpgEnabledMenuItem" Header="Programme guide (EPG)" IsCheckable="True" Click="ToggleEpg_Click" />
                     <MenuItem x:Name="UpdateChecksMenuItem" Header="Check for updates on startup" IsCheckable="True" Click="ToggleUpdateChecks_Click" />
+                    <MenuItem x:Name="AutomaticUpdateDownloadMenuItem" Header="Download signed updates automatically (ask before restart)" IsCheckable="True" Click="ToggleAutomaticUpdateDownload_Click" />
                     <Separator />
                     <MenuItem x:Name="RemoteControlMenuItem" Header="Phone remote" IsCheckable="True" Click="RemoteControlMenuItem_Click" />
                     <Separator />
@@ -88,6 +90,7 @@
             </MenuItem>
             <MenuItem Header="Help">
                 <MenuItem x:Name="CheckForUpdatesMenuItem" Header="Check for updates..." Click="CheckForUpdates_Click" />
+                <MenuItem Header="Open logs folder" Click="OpenLogsFolder_Click" />
                 <MenuItem Header="Feedback..." Click="Feedback_Click" />
                 <Separator />
                 <MenuItem Header="GitHub" Click="GitHub_Click" />
@@ -494,6 +497,10 @@
         </Grid>
 
         <StatusBar x:Name="MainStatusBar" Grid.Row="2" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource Text0Brush}">
+            <TextBlock x:Name="LibraryRefreshStatusText" MaxWidth="640" TextTrimming="CharacterEllipsis" AutomationProperties.LiveSetting="Polite" ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}" />
+            <Button x:Name="CancelLibraryRefreshButton" Content="Cancel" Click="CancelLibraryLoad_Click" IsEnabled="False" Padding="6,0" AutomationProperties.Name="Cancel playlist refresh" />
+            <Button x:Name="RetryLibraryRefreshButton" Content="Retry" Click="RetryLibraryLoad_Click" Padding="6,0" AutomationProperties.Name="Retry playlist refresh" />
+            <Separator />
             <TextBlock x:Name="StatusText" Text="Ready" />
         </StatusBar>
 

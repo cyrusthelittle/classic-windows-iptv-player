@@ -40,6 +40,7 @@ public sealed class SavedAccount
     public string Name { get; set; } = string.Empty;
     public AccountSettings Settings { get; set; } = new();
     public DateTime? LastPlaylistUpdatedUtc { get; set; }
+    public bool BackgroundPlaylistRefresh { get; set; }
 
     public string DisplayName
     {
@@ -275,6 +276,7 @@ public sealed class AppState
     // Update checks are enabled by default. Users can turn them off from the
     // update prompt or Settings, while Help > Check for updates remains available.
     public bool CheckForUpdatesOnStartup { get; set; } = true;
+    public bool DownloadUpdatesAutomatically { get; set; }
 
     // Optional feedback delivery endpoint. This is saved only in the protected
     // local state and is deliberately omitted from portable organization exports.

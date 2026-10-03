@@ -13,6 +13,7 @@ internal static class Program
     [STAThread]
     private static int Main()
     {
+        Environment.SetEnvironmentVariable("CYRUS_IPTV_DATA_ROOT", System.IO.Path.Combine(System.IO.Path.GetTempPath(), "cyrus-ui-isolated-" + Guid.NewGuid().ToString("N")));
         var root = Path.Combine(Path.GetTempPath(), "cyrus-multiview-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         try

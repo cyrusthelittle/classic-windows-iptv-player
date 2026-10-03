@@ -7,6 +7,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Controls.Primitives;
 using System.Windows.Threading;
 using System.Net;
@@ -15,6 +16,7 @@ using System.Text;
 using ClassicWindowsIptvPlayer.Core;
 using ClassicWindowsIptvPlayer.Windows;
 using LibVLCSharp.Shared;
+using MediaPlayer = LibVLCSharp.Shared.MediaPlayer;
 
 internal static class Program
 {
@@ -63,6 +65,7 @@ internal static class Program
     [STAThread]
     static void Main(string[] args)
     {
+        Environment.SetEnvironmentVariable("CYRUS_IPTV_DATA_ROOT", AppContext.BaseDirectory);
         if (!args.Contains("--child"))
         {
             root = Path.Combine(Path.GetTempPath(), "cyrus-playback-settings-ui-" + Guid.NewGuid().ToString("N"));
@@ -152,11 +155,42 @@ internal static class Program
                 Click(Menu(Settings(), "Dark mode"));
                 OpenSettings();
                 Check(Menu(Settings(), "Dark mode").IsChecked, "dark mode checkmark appears after selecting dark mode");
+                Capture("settings-dark");
+                var noticeText = (SolidColorBrush)Application.Current.Resources["NoticeTextBrush"];
+                var noticeBackground = (SolidColorBrush)Application.Current.Resources["NoticeBgBrush"];
+                Check(Contrast(noticeText.Color, noticeBackground.Color) >= 4.5, "dark-mode notice text meets 4.5:1 contrast");
                 Click(Menu(Settings(), "Dark mode"));
                 OpenSettings();
                 Check(!Menu(Settings(), "Dark mode").IsChecked, "dark mode checkmark clears after selecting light mode");
                 Check(((AppState)Field("_state")!).PlaybackBufferMs == 6000 && ((AppState)Field("_state")!).ReconnectAttempts == 15,
                     "actual settings menu actions persist selected buffer and reconnect values");
+                Capture("settings-light");
+                // A native live input with a known duration exercises the fallback that the HLS fixture cannot.
+                Call("StopPlayback");
+                var wavePath = Path.Combine(root, "positive-length.wav");
+                using (var wave = new BinaryWriter(File.Create(wavePath)))
+                {
+                    var samples = new byte[30 * 8000 * 2];
+                    wave.Write(Encoding.ASCII.GetBytes("RIFF")); wave.Write(36 + samples.Length); wave.Write(Encoding.ASCII.GetBytes("WAVEfmt "));
+                    wave.Write(16); wave.Write((short)1); wave.Write((short)1); wave.Write(8000); wave.Write(16000); wave.Write((short)2); wave.Write((short)16);
+                    wave.Write(Encoding.ASCII.GetBytes("data")); wave.Write(samples.Length); wave.Write(samples);
+                }
+                var positiveLength = new Channel { Id = "positive-length-live", Name = "Positive length live fixture", Group = "Fixture",
+                    Url = new Uri(wavePath).AbsoluteUri, MediaKind = MediaKind.Live };
+                Call("PlayChannel", positiveLength, null);
+                await WaitPlaying(positiveLength.Name);
+                await WaitUntil(() => Field("_mediaPlayer") is MediaPlayer { Length: > 10000 }, "native local WAV did not expose a positive length");
+                var seek = (Slider)window.FindName("SeekSlider");
+                var player = (MediaPlayer)Field("_mediaPlayer")!;
+                var target = player.Length * 0.4;
+                Call("SeekSlider_PreviewMouseDown", seek, new MouseButtonEventArgs(System.Windows.Input.Mouse.PrimaryDevice, 0, MouseButton.Left));
+                seek.Value = 400;
+                Check(((TextBlock)window.FindName("TimeText")).Text.Contains(" / "), "positive-length live scrub displays selected and total times");
+                Call("SeekSlider_PreviewMouseUp", seek, new MouseButtonEventArgs(System.Windows.Input.Mouse.PrimaryDevice, 1, MouseButton.Left));
+                await WaitUntil(() => Math.Abs(player.Time - target) < 2500, "positive-length live seek jumped away from requested position");
+                Call("UpdatePlaybackPosition");
+                Check(player.Time < player.Length * 0.8 && seek.Value > 300 && seek.Value < 550,
+                    "positive-length native live seek and cursor remain at interior position after release");
                 File.AppendAllText(Path.Combine(root, "evidence.txt"), "ALL PASS\n");
             }
             catch (Exception ex)
@@ -174,6 +208,21 @@ internal static class Program
         };
         window.Show();
         app.Run();
+    }
+
+    static void Capture(string name)
+    {
+        window.UpdateLayout();
+        var bitmap = new RenderTargetBitmap((int)window.ActualWidth, (int)window.ActualHeight, 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(window);
+        var png = new PngBitmapEncoder(); png.Frames.Add(BitmapFrame.Create(bitmap));
+        using var stream = File.Create(Path.Combine(root, name + ".png")); png.Save(stream);
+    }
+    static double Contrast(Color a, Color b)
+    {
+        static double Component(byte value) { var s = value / 255.0; return s <= 0.04045 ? s / 12.92 : Math.Pow((s + 0.055) / 1.055, 2.4); }
+        static double Luminance(Color color) => 0.2126 * Component(color.R) + 0.7152 * Component(color.G) + 0.0722 * Component(color.B);
+        var x = Luminance(a); var y = Luminance(b); return (Math.Max(x, y) + 0.05) / (Math.Min(x, y) + 0.05);
     }
 
     static async Task WaitUntil(Func<bool> condition, string failure)

@@ -9,10 +9,11 @@ public sealed class MediaSearchIndex
 {
     private readonly List<(Channel Channel, string SearchText)> _items = [];
 
-    public MediaSearchIndex(IEnumerable<Channel> channels)
+    public MediaSearchIndex(IEnumerable<Channel> channels, CancellationToken cancellationToken = default)
     {
         foreach (var channel in channels)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var text = string.Join(' ', channel.Name, channel.Group, channel.MediaKind.ToString()).ToLowerInvariant();
             _items.Add((channel, text));
         }

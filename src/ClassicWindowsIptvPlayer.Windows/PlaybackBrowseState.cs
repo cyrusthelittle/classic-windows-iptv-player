@@ -15,6 +15,7 @@ internal sealed class PlaybackBrowseState
     public IReadOnlyList<PlaybackCandidate> Candidates { get; private set; } = [];
     public int CandidateIndex { get; private set; } = -1;
     private object? _activeRequest;
+    public bool HasActiveRequest => _activeRequest is not null;
 
     public void Select(Channel? channel) => SelectedChannel = channel;
 

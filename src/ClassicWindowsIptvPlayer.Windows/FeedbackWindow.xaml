@@ -15,12 +15,13 @@
             <CheckBox x:Name="IncludeLogsCheckBox" Content="Include recent app logs (redacted)" IsChecked="True" AutomationProperties.Name="Include recent app logs"/>
             <TextBlock Text="Logs can help diagnose problems. You can uncheck this before sending." Foreground="{DynamicResource Text2Brush}" TextWrapping="Wrap" Margin="22,4,0,0"/>
         </StackPanel>
-        <DockPanel Grid.Row="3" Margin="0,14,0,0" LastChildFill="True">
-            <TextBlock x:Name="StatusText" Foreground="{DynamicResource Text2Brush}" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,12,0"/>
-            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+        <Grid Grid.Row="3" Margin="0,14,0,0">
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+            <TextBlock x:Name="StatusText" Foreground="{DynamicResource Text2Brush}" TextWrapping="Wrap" Margin="0,0,0,10"/>
+            <StackPanel Grid.Row="1" HorizontalAlignment="Right" Orientation="Horizontal">
                 <Button Content="Cancel" MinWidth="82" Padding="12,6" Margin="0,0,8,0" IsCancel="True" Click="Cancel_Click"/>
                 <Button x:Name="SendButton" Style="{StaticResource PrimaryButton}" Content="Send" MinWidth="82" Padding="12,6" IsDefault="True" Click="Send_Click"/>
             </StackPanel>
-        </DockPanel>
+        </Grid>
     </Grid>
 </Window>

@@ -28,6 +28,7 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        Environment.SetEnvironmentVariable("CYRUS_IPTV_DATA_ROOT", AppContext.BaseDirectory);
         if (!args.Contains("--child"))
         {
             root = Path.Combine(Path.GetTempPath(), "cyrus-timeshift-ui-" + Guid.NewGuid().ToString("N"));

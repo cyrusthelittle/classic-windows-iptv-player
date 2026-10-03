@@ -18,6 +18,7 @@ internal static partial class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        Environment.SetEnvironmentVariable("CYRUS_IPTV_DATA_ROOT", AppContext.BaseDirectory);
         var automated = args.Contains("--automated", StringComparer.OrdinalIgnoreCase);
         var child = args.Contains("--child", StringComparer.OrdinalIgnoreCase);
         var root = child ? AppContext.BaseDirectory : Path.Combine(Path.GetTempPath(), "cyrus-step16-" + Guid.NewGuid().ToString("N"));

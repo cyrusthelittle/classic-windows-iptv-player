@@ -22,6 +22,7 @@ internal static class Program
     static async Task WaitVisibility(FrameworkElement element,Visibility expected){for(int i=0;i<40;i++){if(element.Visibility==expected)return;await Task.Delay(50);}throw new Exception($"expected {element.Name} visibility {expected}, got {element.Visibility}");}
     [STAThread] static void Main(string[] args)
     {
+        Environment.SetEnvironmentVariable("CYRUS_IPTV_DATA_ROOT", AppContext.BaseDirectory);
         if(!args.Contains("--child"))
         {
             root=Path.Combine(Path.GetTempPath(),"cyrus-catchup-ui-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(root);

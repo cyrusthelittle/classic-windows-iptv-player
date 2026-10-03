@@ -15,5 +15,6 @@
     <Compile Include="../../src/ClassicWindowsIptvPlayer.Windows/GuideSearchRows.cs" Link="GuideSearchRows.cs" />
     <Compile Include="../../src/ClassicWindowsIptvPlayer.Windows/VideoHostOwnershipPolicy.cs" Link="VideoHostOwnershipPolicy.cs" />
     <Compile Include="../../src/ClassicWindowsIptvPlayer.Windows/SharedHlsSource.cs" Link="SharedHlsSource.cs" />
+    <Compile Include="../../src/ClassicWindowsIptvPlayer.Windows/GitHubUpdateService.cs" Link="GitHubUpdateService.cs" />
   </ItemGroup>
 </Project>

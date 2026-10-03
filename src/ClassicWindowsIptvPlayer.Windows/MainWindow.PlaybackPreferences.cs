@@ -39,6 +39,7 @@ public partial class MainWindow
 
     private void UpdateSettingsCheckmarks(MenuItem settings)
     {
+        BackgroundPlaylistRefreshMenuItem.IsChecked = _state.EnsureSelectedAccount().BackgroundPlaylistRefresh;
         var buffer = _state.PlaybackBufferMs <= 0 ? 1000 : Math.Clamp(_state.PlaybackBufferMs, 500, 30000);
         foreach (var (header, selected) in new[]
         {

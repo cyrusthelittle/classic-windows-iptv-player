@@ -4,5 +4,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <Version>0.1.0</Version>
+    <DefaultItemExcludes>$(DefaultItemExcludes);**/artifacts/**</DefaultItemExcludes>
+    <UpdateTrustPath Condition="'$(UpdateTrustPath)' == ''">$(MSBuildThisFileDirectory)UpdateTrust.pem</UpdateTrustPath>
   </PropertyGroup>
+  <ItemGroup Condition="Exists('$(UpdateTrustPath)')">
+    <EmbeddedResource Include="$(UpdateTrustPath)" LogicalName="UpdateTrust.pem" />
+  </ItemGroup>
 </Project>

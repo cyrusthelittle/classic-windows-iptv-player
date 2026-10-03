@@ -29,6 +29,7 @@ internal static class Program
     [STAThread]
     private static void Main()
     {
+        Environment.SetEnvironmentVariable("CYRUS_IPTV_DATA_ROOT", System.IO.Path.Combine(System.IO.Path.GetTempPath(), "cyrus-ui-isolated-" + Guid.NewGuid().ToString("N")));
         File.WriteAllText(LogPath, "Fixture=" + Fixture + Environment.NewLine);
         GenerateAvi.Run(Fixture);
         Core.Initialize();

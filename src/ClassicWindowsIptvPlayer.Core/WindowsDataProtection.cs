@@ -29,7 +29,15 @@ internal static class WindowsDataProtection
     public static byte[] Protect(byte[] bytes, byte[] entropy) => Transform(bytes, entropy, protect: true);
     public static byte[] Unprotect(byte[] bytes, byte[] entropy) => Transform(bytes, entropy, protect: false);
 
-    private static byte[] Transform(byte[] bytes, byte[] entropyBytes, bool protect)
+    public static byte[] ProtectSigningKey(byte[] bytes, byte[] entropy) => Transform(bytes, entropy, protect: true, clearMemory: true);
+    public static byte[] UnprotectSigningKey(byte[] bytes, byte[] entropy) => Transform(bytes, entropy, protect: false, clearMemory: true);
+    private static void ClearBlob(Blob blob)
+    {
+        if (blob.Data == IntPtr.Zero || blob.Length <= 0) return;
+        var zeros = new byte[Math.Min(65536, blob.Length)];
+        for (var offset = 0; offset < blob.Length; offset += zeros.Length) Marshal.Copy(zeros, 0, IntPtr.Add(blob.Data, offset), Math.Min(zeros.Length, blob.Length - offset));
+    }
+    private static byte[] Transform(byte[] bytes, byte[] entropyBytes, bool protect, bool clearMemory = false)
     {
         var input = Allocate(bytes);
         var entropy = Allocate(entropyBytes);
@@ -47,6 +55,7 @@ internal static class WindowsDataProtection
         }
         finally
         {
+            if (clearMemory) { ClearBlob(input); ClearBlob(output); }
             if (input.Data != IntPtr.Zero) Marshal.FreeHGlobal(input.Data);
             if (entropy.Data != IntPtr.Zero) Marshal.FreeHGlobal(entropy.Data);
             if (output.Data != IntPtr.Zero) LocalFree(output.Data);

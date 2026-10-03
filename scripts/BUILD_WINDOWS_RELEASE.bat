@@ -13,7 +13,7 @@ if errorlevel 1 (
 if exist release\classic-windows-iptv-player rmdir /s /q release\classic-windows-iptv-player
 mkdir release\classic-windows-iptv-player
 
-dotnet publish src\ClassicWindowsIptvPlayer.Windows\ClassicWindowsIptvPlayer.Windows.csproj -c Release -r win-x64 --self-contained true -o release\classic-windows-iptv-player /p:PublishSingleFile=true /p:EnableCompressionInSingleFile=true --nologo
+dotnet publish src\ClassicWindowsIptvPlayer.Windows\ClassicWindowsIptvPlayer.Windows.csproj -c Release -r win-x64 --self-contained true -o release\classic-windows-iptv-player /p:PublishSingleFile=false --nologo
 if errorlevel 1 (
   echo Publish failed.
   pause

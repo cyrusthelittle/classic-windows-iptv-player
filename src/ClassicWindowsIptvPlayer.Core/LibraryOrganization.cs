@@ -2,7 +2,7 @@ namespace ClassicWindowsIptvPlayer.Core;
 
 public static class LibraryOrganization
 {
-    public static List<Channel> Apply(IReadOnlyList<Channel> source, AccountLibraryState library)
+    public static List<Channel> Apply(IReadOnlyList<Channel> source, AccountLibraryState library, CancellationToken cancellationToken = default)
     {
         var channels = library.ChannelOrganization ?? new(StringComparer.OrdinalIgnoreCase);
         var groups = library.GroupOrganization ?? new(StringComparer.OrdinalIgnoreCase);
@@ -10,15 +10,17 @@ public static class LibraryOrganization
         var groupFirstIndex = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         for (var i = 0; i < source.Count; i++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var item = source[i];
             groupFirstIndex.TryAdd(item.Group, i);
-            var key = ItemIdentity.For(item);
-            channels.TryGetValue(key, out var overrideItem);
+            ChannelOrganization? overrideItem = null;
+            if (channels.Count > 0) channels.TryGetValue(ItemIdentity.For(item), out overrideItem);
             groups.TryGetValue(item.Group, out var overrideGroup);
             if (overrideItem?.Hidden == true || overrideGroup?.Hidden == true) continue;
-            // The provider cache remains pristine. Display copies keep their original
-            // identity so favorites, guide mapping and history survive a rename.
-            var display = new Channel
+            // Keep unchanged provider objects shared. Renamed display copies keep
+            // original identity so favorites, guide mapping and history survive.
+            var display = string.IsNullOrWhiteSpace(overrideItem?.Name) && string.IsNullOrWhiteSpace(overrideGroup?.Name)
+                ? item : new Channel
             {
                 Id = item.Id, IdentityName = item.IdentityName ?? item.Name, IdentityGroup = item.IdentityGroup ?? item.Group,
                 Name = string.IsNullOrWhiteSpace(overrideItem?.Name) ? item.Name : overrideItem.Name,
@@ -32,8 +34,8 @@ public static class LibraryOrganization
             result.Add((display, overrideGroup?.Order ?? 0, overrideItem?.Order ?? 0, i));
         }
         return result.OrderBy(x => x.GroupOrder == 0 ? int.MaxValue : x.GroupOrder)
-            .ThenBy(x => x.GroupOrder == 0 ? groupFirstIndex[x.Channel.IdentityGroup!] : 0)
-            .ThenBy(x => x.Channel.IdentityGroup, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(x => x.GroupOrder == 0 ? groupFirstIndex[x.Channel.IdentityGroup ?? x.Channel.Group] : 0)
+            .ThenBy(x => x.Channel.IdentityGroup ?? x.Channel.Group, StringComparer.OrdinalIgnoreCase)
             .ThenBy(x => x.ItemOrder == 0 ? int.MaxValue : x.ItemOrder)
             .ThenBy(x => x.Index).Select(x => x.Channel).ToList();
     }

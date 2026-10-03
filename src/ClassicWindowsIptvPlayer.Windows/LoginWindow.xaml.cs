@@ -140,6 +140,7 @@ public partial class LoginWindow : Window
     {
         if (_loadingAccount || AccountTypeBox.SelectedIndex < 0) return;
         var previous = _session.Selected.Settings;
+        _session.Selected.BackgroundPlaylistRefresh = BackgroundPlaylistRefreshCheck.IsChecked == true;
         var useM3u = AccountTypeBox.SelectedIndex == 1;
         _session.EditSelected(AccountNameBox.Text, new AccountSettings
         {
@@ -188,6 +189,7 @@ public partial class LoginWindow : Window
     private void LoadSelectedAccountIntoFields()
     {
         var account = _session.Selected;
+        BackgroundPlaylistRefreshCheck.IsChecked = account.BackgroundPlaylistRefresh;
         AccountNameBox.Text = account.Name;
         ServerUrlBox.Text = account.Settings.ServerUrl;
         M3uUrlBox.Text = account.Settings.M3uUrl;

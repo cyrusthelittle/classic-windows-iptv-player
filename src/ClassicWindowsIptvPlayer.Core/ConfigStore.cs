@@ -24,7 +24,7 @@ public sealed class ConfigStore
 
     public ConfigStore(string? dataDirectory = null)
     {
-        var root = dataDirectory ?? AppContext.BaseDirectory;
+        var root = dataDirectory ?? AppDataPaths.Root;
         _appFolder = Path.Combine(root, "cache");
         _statePath = Path.Combine(root, "accounts.json");
         _channelCachePath = Path.Combine(_appFolder, "channels.json.gz");
@@ -74,6 +74,8 @@ public sealed class ConfigStore
         state.EnsureAccounts();
         state.SchemaVersion = AppState.CurrentSchemaVersion;
         AtomicWrite(_statePath, Protect(JsonSerializer.SerializeToUtf8Bytes(state, JsonOptions)));
+        var firstRun = Path.Combine(Path.GetDirectoryName(_statePath)!, "first-run.pending");
+        if (File.Exists(firstRun)) File.Delete(firstRun);
     }
 
     public bool HasChannelCache => File.Exists(_channelCachePath) || File.Exists(_channelCachePath + ".bak");
@@ -84,7 +86,19 @@ public sealed class ConfigStore
     }
 
     public List<Channel> LoadChannelCache() => ReadChannelCache(_channelCachePath);
-    public List<Channel> LoadChannelCache(string accountId) => ReadChannelCache(GetChannelCachePath(accountId));
+    public List<Channel> LoadChannelCache(string accountId, Action<string, TimeSpan>? measure = null) => ReadChannelCache(GetChannelCachePath(accountId), measure);
+
+    // Recovery and restored backups also invalidate prepared catalogs.
+    public string ChannelCacheRevision(string accountId)
+    {
+        var path = GetChannelCachePath(accountId);
+        static string Stamp(string file)
+        {
+            var info = new FileInfo(file);
+            return info.Exists ? $"{info.Length}:{info.LastWriteTimeUtc.Ticks}:{info.CreationTimeUtc.Ticks}" : "missing";
+        }
+        return Stamp(path) + "|" + Stamp(path + ".bak");
+    }
 
     public EpgGuideSnapshot? LoadGuideCache(string accountId)
     {
@@ -187,17 +201,76 @@ public sealed class ConfigStore
     public string GetRecordingIndexPath(string accountId) =>
         Path.Combine(_appFolder, RecordingIndexPrefix + SanitizeAccountId(accountId) + ".json.gz");
 
-    private List<Channel> ReadChannelCache(string path)
+    private List<Channel> ReadChannelCache(string path, Action<string, TimeSpan>? measure = null)
     {
         if (!File.Exists(path) && !File.Exists(path + ".bak")) return [];
-        var bytes = ReadRecoverable(path, ValidateCache);
-        using var input = new MemoryStream(Unprotect(bytes));
-        using var gzip = new GZipStream(input, CompressionMode.Decompress);
-        return JsonSerializer.Deserialize(gzip, ChannelJsonContext.Default.ListChannel) ?? [];
+        // Retain the validated result instead of parsing a second full catalog.
+        List<Channel>? parsed = null;
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        ReadRecoverable(path, bytes =>
+        {
+            measure?.Invoke("read", timer.Elapsed);
+            timer.Restart();
+            var plaintext = Unprotect(bytes);
+            measure?.Invoke("decrypt", timer.Elapsed);
+            timer.Restart();
+            using var input = new MemoryStream(plaintext);
+            using var gzip = new GZipStream(input, CompressionMode.Decompress);
+            parsed = JsonSerializer.Deserialize(gzip, ChannelJsonContext.Default.ListChannel);
+            measure?.Invoke("decompress/parse", timer.Elapsed);
+            return parsed is not null;
+        });
+        return parsed!;
     }
 
     public void SaveChannelCache(IReadOnlyList<Channel> channels) => WriteChannelCache(_channelCachePath, channels);
     public void SaveChannelCache(string accountId, IReadOnlyList<Channel> channels) => WriteChannelCache(GetChannelCachePath(accountId), channels);
+
+    public StagedChannelCache StageChannelCache(string accountId, IReadOnlyList<Channel> channels, CancellationToken cancellationToken)
+    {
+        var path = GetChannelCachePath(accountId);
+        var temporary = path + "." + Guid.NewGuid().ToString("N") + ".refresh.tmp";
+        var staged = new StagedChannelCache(path, temporary);
+        try
+        {
+            PlaylistRefreshValidation.Validate(channels, cancellationToken);
+            using var output = new MemoryStream();
+            using (var gzip = new GZipStream(output, CompressionLevel.Fastest, leaveOpen: true))
+                JsonSerializer.Serialize(gzip, channels as List<Channel> ?? [.. channels], ChannelJsonContext.Default.ListChannel);
+            cancellationToken.ThrowIfCancellationRequested();
+            var bytes = Protect(output.ToArray());
+            cancellationToken.ThrowIfCancellationRequested();
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                stream.Write(bytes);
+                stream.Flush(flushToDisk: true);
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            return staged;
+        }
+        catch
+        {
+            staged.Dispose();
+            throw;
+        }
+    }
+
+    public sealed class StagedChannelCache : IDisposable
+    {
+        private readonly string _path;
+        private readonly string _temporary;
+        internal StagedChannelCache(string path, string temporary) { _path = path; _temporary = temporary; }
+        public void Commit()
+        {
+            if (File.Exists(_path)) File.Replace(_temporary, _path, _path + ".bak", true);
+            else File.Move(_temporary, _path);
+        }
+        public void Dispose()
+        {
+            if (File.Exists(_temporary)) File.Delete(_temporary);
+        }
+    }
 
     private static void WriteChannelCache(string path, IReadOnlyList<Channel> channels, bool replaceBackup = true)
     {
@@ -384,6 +457,48 @@ public sealed class ConfigStore
         public List<FavoriteFolder> FavoriteFolders { get; set; } = [];
         public Dictionary<string, ChannelOrganization> ChannelOrganization { get; set; } = new(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, GroupOrganization> GroupOrganization { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    }
+
+    internal static void ProtectRecoveryCopies(string root)
+    {
+        foreach (var file in Directory.GetFiles(root, "*", SearchOption.AllDirectories))
+        {
+            var name = Path.GetFileName(file);
+            if (!name.StartsWith("accounts.json", StringComparison.Ordinal) && !name.Contains(".json.gz", StringComparison.Ordinal)) continue;
+            var bytes = File.ReadAllBytes(file);
+            if (!Encoding.UTF8.GetString(bytes).StartsWith(ProtectedHeader, StringComparison.Ordinal)) File.WriteAllBytes(file, Protect(bytes));
+        }
+    }
+
+    internal void NormalizeMigrationRecordingPaths(string legacyRoot)
+    {
+        foreach (var file in Directory.GetFiles(_appFolder, "recordings-*.json.gz*").Where(p => p.EndsWith(".json.gz", StringComparison.OrdinalIgnoreCase) || p.EndsWith(".json.gz.bak", StringComparison.OrdinalIgnoreCase)).Select(p => p.EndsWith(".bak", StringComparison.OrdinalIgnoreCase) ? p[..^4] : p).Distinct())
+        {
+            var bytes = ReadRecoverable(file, ValidateRecordingIndex);
+            using var input = new MemoryStream(Unprotect(bytes));
+            using var gzip = new GZipStream(input, CompressionMode.Decompress);
+            var index = JsonSerializer.Deserialize<RecordingIndex>(gzip, JsonOptions)!;
+            if (index.Version > RecordingIndex.CurrentVersion) throw new InvalidDataException("Recording index requires a newer app version.");
+            index.Entries = index.Entries.Select(entry => string.IsNullOrWhiteSpace(entry.FilePath) ? entry :
+                entry with { FilePath = Path.GetFullPath(entry.FilePath, legacyRoot) }).ToList();
+            index.Normalize();
+            using var output = new MemoryStream();
+            using (var compressed = new GZipStream(output, CompressionLevel.Fastest, leaveOpen: true)) JsonSerializer.Serialize(compressed, index, JsonOptions);
+            AtomicWrite(file, Protect(output.ToArray()));
+        }
+    }
+
+    internal void ValidateMigrationCaches()
+    {
+        foreach (var file in Directory.GetFiles(_appFolder, "*.json.gz*").Where(p => p.EndsWith(".json.gz", StringComparison.OrdinalIgnoreCase) || p.EndsWith(".json.gz.bak", StringComparison.OrdinalIgnoreCase)).Select(p => p.EndsWith(".bak", StringComparison.OrdinalIgnoreCase) ? p[..^4] : p).Distinct())
+        {
+            var name = Path.GetFileName(file);
+            Func<byte[], bool>? validator = name.StartsWith("channels", StringComparison.Ordinal) ? ValidateCache :
+                name.StartsWith("guide-", StringComparison.Ordinal) ? ValidateGuideCache :
+                name.StartsWith(RecordingIndexPrefix, StringComparison.Ordinal) ? ValidateRecordingIndex :
+                name.StartsWith(RetiredScheduledRecordingIndexPrefix, StringComparison.Ordinal) ? ValidateRetiredScheduledRecordingIndex : null;
+            if (validator is not null) ReadRecoverable(file, validator);
+        }
     }
 
     private static bool ValidateState(byte[] bytes)

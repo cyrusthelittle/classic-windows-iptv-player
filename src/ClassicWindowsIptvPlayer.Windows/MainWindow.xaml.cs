@@ -55,12 +55,41 @@ public partial class MainWindow : Window
     };
     private AppState _state;
     private List<Channel> _sourceChannels = [];
+    private string _sourceCatalogRevision = string.Empty;
+    private string _sourceDiskRevision = string.Empty;
+    private readonly PreparedLibraryCache _preparedLibraries = new();
 
     private void RefreshOrganizedLibrary()
     {
-        _channels = LibraryOrganization.Apply(_sourceChannels, _state.SelectedLibrary);
-        _searchIndex = new MediaSearchIndex(_channels);
-        ApplyFilters();
+        _ = RefreshOrganizedLibraryAsync();
+    }
+
+    private async Task RefreshOrganizedLibraryAsync()
+    {
+        _preparedLibraries.Remove(_state.SelectedAccountId);
+        _libraryLoadCts?.Cancel();
+        var generation = ++_libraryLoadGeneration;
+        var accountId = _state.SelectedAccountId;
+        var source = _sourceChannels;
+        var sourceDiskRevision = _sourceDiskRevision;
+        var organization = PreparedLibraryCache.SnapshotOrganization(_state.SelectedLibrary);
+        try
+        {
+            var prepared = await Task.Run(() =>
+            {
+                var channels = LibraryOrganization.Apply(source, organization);
+                return new PreparedLibrary(source, channels, new MediaSearchIndex(channels));
+            });
+            if (generation != _libraryLoadGeneration || accountId != _state.SelectedAccountId || !ReferenceEquals(source, _sourceChannels)) return;
+            _channels = prepared.Channels;
+            _searchIndex = prepared.Index;
+            _sourceCatalogRevision = PreparedLibraryCache.Revision(_state.Account, organization, sourceDiskRevision);
+            if (sourceDiskRevision == _store.ChannelCacheRevision(accountId))
+                _preparedLibraries.Put(accountId, _sourceCatalogRevision, prepared);
+            await ApplyFiltersAsync();
+        }
+        catch (Exception ex) { AppLogger.Error("Organization preparation failed.", ex); }
+        finally { if (generation == _libraryLoadGeneration) HideAccountLoading(); }
     }
 
     private void ExportOrganization_Click(object sender, RoutedEventArgs e)
@@ -154,6 +183,8 @@ public partial class MainWindow : Window
         try
         {
             _store.RestoreBackup(dialog.FileName);
+            _preparedLibraries.Clear();
+            _accountBrowsePositions.Clear();
             StopPlayback();
             ResetAccountView();
             _state = _store.Load();
@@ -217,6 +248,7 @@ public partial class MainWindow : Window
     private string? _activeSeriesId;
     private string? _activeSeriesName;
     private List<Channel>? _activeSeriesEpisodes;
+    private string _activeSeriesRevision = string.Empty;
     private List<Channel>? _playingSeriesEpisodes;
     private int? _activeSeason;
     private double? _seriesReturnOffset;
@@ -240,6 +272,7 @@ public partial class MainWindow : Window
     private bool _suppressChannelSelectionChange;
     private bool _isChangingAccount;
     private bool _isCheckingForUpdates;
+    private StagedUpdate? _stagedUpdate;
     private DateTime? _livePauseStartedUtc;
     private DateTime _lastEpgUiUpdateUtc = DateTime.MinValue;
     private TimeSpan _liveBehind = TimeSpan.Zero;
@@ -247,7 +280,11 @@ public partial class MainWindow : Window
     private string _pendingResumeChannelId = string.Empty;
     private int _pendingResumeSeekAttempts;
     private int _mediaKindMode;
-    private readonly LibraryNavigationHistory _libraryHistory = new();
+    private LibraryNavigationHistory _libraryHistory = new();
+    private readonly Dictionary<string, AccountBrowsePosition> _accountBrowsePositions = new();
+    private sealed record AccountBrowsePosition(LibraryPosition Position, LibraryNavigationHistory History,
+        int MediaKind, string Search, string? SeriesId, string? SeriesName, List<Channel>? Episodes,
+        int? Season, VodSort Sort, string Revision);
     private LibraryPosition? _pendingLibraryRestore;
     private string _displayedCatalogScope = string.Empty;
     private int _viewMode = 2;
@@ -263,9 +300,14 @@ public partial class MainWindow : Window
     private double _widthBeforeFullScreen;
     private double _heightBeforeFullScreen;
     private CancellationTokenSource? _filterCts;
+    private int _filterGeneration;
     private CancellationTokenSource? _sourceProbeCts;
     private CancellationTokenSource? _epgCts;
     private CancellationTokenSource? _libraryLoadCts;
+    private Task? _libraryLoadTask;
+    private string? _libraryLoadTaskAccountId;
+    private bool _libraryLoadTaskRefresh;
+    private long _libraryLoadRequest;
     private CancellationTokenSource? _seriesLoadCts;
     private int _libraryLoadGeneration;
     private int _seriesLoadGeneration;
@@ -277,7 +319,7 @@ public partial class MainWindow : Window
     // window only renders the states it reports and hosts the video surface.
     private ChannelTuner? _tuner;
 
-    public MainWindow(LoginResult login)
+    public MainWindow(LoginResult login, bool updateHealthProbe = false)
     {
         _login = login;
         _state = _store.Load();
@@ -287,8 +329,8 @@ public partial class MainWindow : Window
         var selectedAccount = _state.EnsureSelectedAccount();
         selectedAccount.Settings = login.Account.Clone();
         _state.Account = selectedAccount.Settings.Clone();
-        _recordingIndex = _store.LoadRecordingIndex(login.AccountId) ?? new RecordingIndex();
-        _store.Save(_state);
+        _recordingIndex = updateHealthProbe ? new RecordingIndex() : _store.LoadRecordingIndex(login.AccountId) ?? new RecordingIndex();
+        if (!updateHealthProbe) _store.Save(_state);
 
         InitializeComponent();
         ChannelList.ContextMenu = new System.Windows.Controls.ContextMenu();
@@ -302,6 +344,7 @@ public partial class MainWindow : Window
         DarkModeMenuItem.IsChecked = _state.DarkMode;
         EpgEnabledMenuItem.IsChecked = _state.EpgEnabled;
         UpdateChecksMenuItem.IsChecked = _state.CheckForUpdatesOnStartup;
+        AutomaticUpdateDownloadMenuItem.IsChecked = _state.DownloadUpdatesAutomatically;
         UpdateEpgEnabledUi();
         ApplyDefaultStartupFilters();
         InitializeButtonIcons();
@@ -338,6 +381,7 @@ public partial class MainWindow : Window
             VolumeOsdPopup.IsOpen = false;
         };
 
+        if (updateHealthProbe) { _feedbackOutbox.Dispose(); return; }
         Loaded += MainWindow_Loaded;
         ContentRendered += MainWindow_ContentRendered;
         Activated += (_, _) =>
@@ -398,6 +442,7 @@ public partial class MainWindow : Window
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
+        long startupLibraryRequest = -1;
         try
         {
             AppLogger.Info("MainWindow loaded. Initializing player and playlist.");
@@ -414,17 +459,21 @@ public partial class MainWindow : Window
             // on a cached-playlist launch, where the playlist load is fast but
             // used to sit behind the (slower) player init anyway.
             var playerTask = InitializePlayerAsync();
-            var channelsTask = LoadChannelsAsync(_login.UpdatePlaylist, keepLoadingVisible: true);
+            var channelsTask = LoadChannelsAsync(_login.UpdatePlaylist || _state.EnsureSelectedAccount().BackgroundPlaylistRefresh, keepLoadingVisible: true);
+            startupLibraryRequest = _libraryLoadRequest;
 
-            await Task.WhenAll(playerTask, channelsTask);
+            await playerTask;
+            if (_isShuttingDown) return;
             InitializeBufferBox();
             InitializeVolumeControls();
             ApplyRemoteControlState(showStatus: false);
-            HideAccountLoading();
+            await channelsTask;
+            if (!_isShuttingDown && startupLibraryRequest == _libraryLoadRequest) HideAccountLoading();
         }
         catch (Exception ex)
         {
             AppLogger.Error("MainWindow loaded failed.", ex);
+            if (_isShuttingDown || (startupLibraryRequest >= 0 && startupLibraryRequest != _libraryLoadRequest)) return;
             HideAccountLoading();
             StatusText.Text = "Startup error: " + AppLogger.SanitizeText(ex.Message);
             MessageBox.Show(this, AppLogger.SanitizeException(ex), "Startup error", MessageBoxButton.OK, MessageBoxImage.Error);
@@ -435,7 +484,7 @@ public partial class MainWindow : Window
     {
         AppLogger.Info("Initializing LibVLC player. bufferMs=" + GetPlaybackBufferMs() + "; volume=" + _state.VolumeLevel + "; muted=" + _state.Muted);
         var buffer = GetPlaybackBufferMs();
-        _libVlc = await Task.Run(() =>
+        var initializedVlc = await Task.Run(() =>
         {
             LibVLCSharp.Shared.Core.Initialize();
             return new LibVLC(
@@ -447,6 +496,12 @@ public partial class MainWindow : Window
                 "--file-caching=" + buffer,
                 "--http-reconnect");
         });
+        if (_isShuttingDown)
+        {
+            initializedVlc.Dispose();
+            return;
+        }
+        _libVlc = initializedVlc;
 
         // Record native player errors (HTTP status, demux failures, ...) so failed
         // tune attempts in the app log show the server's actual refusal reason.
@@ -561,7 +616,7 @@ public partial class MainWindow : Window
     private static string? NormalizeRecordingFolder(string? folder)
     {
         if (string.IsNullOrWhiteSpace(folder)) return null;
-        try { return System.IO.Directory.Exists(folder) ? System.IO.Path.GetFullPath(folder) : null; }
+        try { return System.IO.Path.GetFullPath(folder); }
         catch (Exception exception) when (exception is ArgumentException or System.IO.IOException or UnauthorizedAccessException or NotSupportedException) { return null; }
     }
 
@@ -569,7 +624,7 @@ public partial class MainWindow : Window
 
     private static string GetDefaultRecordingFolder()
     {
-        return System.IO.Path.Combine(AppContext.BaseDirectory, "Recordings");
+        return System.IO.Path.Combine(AppDataPaths.Root, "Recordings");
     }
 
     private void ChooseRecordingFolder_Click(object sender, RoutedEventArgs e)
@@ -926,47 +981,108 @@ public partial class MainWindow : Window
         UpdateFavoriteButton();
     }
 
-    private async Task LoadChannelsAsync(bool updatePlaylist, bool keepLoadingVisible = false)
+    private Task LoadChannelsAsync(bool updatePlaylist, bool keepLoadingVisible = false, bool allowProvider = true)
+    {
+        if (allowProvider && updatePlaylist && _libraryLoadTask is { IsCompleted: false } &&
+            _libraryLoadTaskAccountId == _state.SelectedAccountId && _libraryLoadTaskRefresh &&
+            _libraryLoadCts?.IsCancellationRequested == false)
+            return _libraryLoadTask;
+
+        var previous = _libraryLoadTask;
+        _libraryLoadCts?.Cancel();
+        ++_libraryLoadGeneration; // Invalidate old publications before awaiting its cleanup.
+        var request = ++_libraryLoadRequest;
+        var requestedAccountId = _state.SelectedAccountId;
+        _libraryLoadTaskAccountId = requestedAccountId;
+        _libraryLoadTaskRefresh = updatePlaylist && allowProvider;
+        return _libraryLoadTask = RunAsync();
+
+        async Task RunAsync()
+        {
+            // Await the preceding request before any new provider/cache work. In particular,
+            // cancellation never permits two writers to race over the same account cache.
+            try
+            {
+                if (previous is not null)
+                {
+                    try { await previous; }
+                    catch (Exception exception) { AppLogger.Error("Previous library task failed during cleanup.", exception); }
+                }
+                if (request != _libraryLoadRequest || _isShuttingDown) return;
+                await LoadChannelsCoreAsync(updatePlaylist, keepLoadingVisible, allowProvider);
+            }
+            catch (Exception exception)
+            {
+                // Account opening launches this task without awaiting it. Observe even
+                // unexpected preparation failures and allow a subsequent Retry.
+                AppLogger.Error("Library task preparation failed.", exception);
+                if (request != _libraryLoadRequest || requestedAccountId != _state.SelectedAccountId || _isShuttingDown) return;
+                var failedSource = _libraryLoadCts;
+                _libraryLoadCts = null;
+                failedSource?.Dispose();
+                SetLibraryRefreshStatus("Playlist preparation failed; retry available.", false);
+                HideAccountLoading();
+            }
+        }
+    }
+
+    private async Task LoadChannelsCoreAsync(bool updatePlaylist, bool keepLoadingVisible, bool allowProvider)
     {
         _libraryLoadCts?.Cancel();
         var cts = new CancellationTokenSource();
         _libraryLoadCts = cts;
         var generation = ++_libraryLoadGeneration;
         var accountId = _state.SelectedAccountId;
+        var account = _state.Account.Clone();
+        var organization = PreparedLibraryCache.SnapshotOrganization(_state.SelectedLibrary);
+        var timer = Stopwatch.StartNew();
         AppLogger.Info("LoadChannelsAsync begin. updatePlaylist=" + updatePlaylist + "; accountId=" + _state.SelectedAccountId);
-        ShowAccountLoading(updatePlaylist
+        if (_channels.Count == 0) ShowAccountLoading(updatePlaylist
             ? "Connecting to your provider and updating the playlist..."
             : "Loading your saved playlist...");
-        List<Channel> saved = updatePlaylist && _sourceChannels.Count > 0 ? _sourceChannels : [];
+        List<Channel> saved = updatePlaylist && _sourceCatalogRevision == CacheRevision() ? _sourceChannels : [];
         var savedLoaded = saved.Count > 0;
+        var savedDiskRevision = savedLoaded ? _sourceDiskRevision : _store.ChannelCacheRevision(accountId);
+        var catalogCommitted = false;
+        var timestampSaved = true;
 
         try
         {
             StatusText.Text = updatePlaylist ? "Updating playlist..." : "Loading cached playlist...";
+            SetLibraryRefreshStatus(updatePlaylist ? "Updating playlist..." : "Loading saved playlist...", true);
             if (!IsCurrentLoad()) return;
-            // A refresh already has to hold the newly parsed provider catalog in
-            // memory. Defer inflating the previous cache until we know it is needed
-            // as a fallback; otherwise a large saved catalog and a large new catalog
-            // overlap during every successful account refresh.
-            if (!updatePlaylist) await DisplaySavedLibraryAsync();
+            await DisplaySavedLibraryAsync();
+            if (!IsCurrentLoad()) return;
             if (updatePlaylist || saved.Count == 0)
             {
-                var account = _state.Account.Clone();
-                var progress = new Progress<string>(stage => { if (IsCurrentLoad()) SetAccountLoadingMessage(stage); });
+                if (!allowProvider)
+                {
+                    StatusText.Text = "No usable saved library is available. Retry the provider from Playlist menu.";
+                    return;
+                }
+                var progress = new Progress<string>(stage =>
+                {
+                    if (!IsCurrentLoad()) return;
+                    if (_channels.Count == 0) SetAccountLoadingMessage(stage);
+                    else StatusText.Text = stage;
+                    SetLibraryRefreshStatus(stage, true);
+                });
                 var result = await _playlistService.LoadPlaylistResultAsync(account, cts.Token, progress);
                 if (!IsCurrentLoad()) return;
                 if (updatePlaylist && !savedLoaded) await EnsureSavedLibraryLoadedAsync();
+                if (!IsCurrentLoad()) return;
                 var missingSavedKind = saved.Select(item => item.MediaKind).Distinct()
                     .Any(kind => !result.Channels.Any(item => item.MediaKind == kind));
-                if ((result.IsPartial || missingSavedKind) && saved.Count > 0)
+                if (result.IsPartial || missingSavedKind)
                 {
                     await DisplaySavedLibraryAsync();
+                    if (!IsCurrentLoad()) return;
                     StatusText.Text = (missingSavedKind ? "Provider omitted a saved media category." : result.Message) +
-                                      " Using saved library. Retry from Playlist menu.";
+                                      " Complete playlist required; retry available.";
+                    SetLibraryRefreshStatus(_channels.Count > 0 ? "Incomplete refresh; saved playlist retained." : "Incomplete playlist; retry required.", false);
                     return;
                 }
-                // The old cache was needed only to compare media categories. Let it
-                // go before creating the new organized view and search index.
+                // The visible saved view remains usable while its replacement is prepared.
                 if (updatePlaylist)
                 {
                     saved = [];
@@ -974,25 +1090,49 @@ public partial class MainWindow : Window
                 }
                 SetAccountLoadingMessage($"Preparing {result.Channels.Count:N0} playlist items...");
                 var replacement = result.Channels.ToList();
-                var organized = await Task.Run(() => LibraryOrganization.Apply(replacement, _state.SelectedLibrary), cts.Token);
-                var index = await Task.Run(() => new MediaSearchIndex(organized), cts.Token);
+                var organized = await Task.Run(() =>
+                {
+                    PlaylistRefreshValidation.Validate(replacement, cts.Token);
+                    return LibraryOrganization.Apply(replacement, organization, cts.Token);
+                }, cts.Token);
+                var preparedReplacement = await Task.Run(() => new PreparedLibrary(replacement, organized, new MediaSearchIndex(organized, cts.Token)), cts.Token);
                 if (!IsCurrentLoad()) return;
                 if (!result.IsPartial)
                 {
                     SetAccountLoadingMessage("Saving verified library...");
-                    await Task.Run(() => _store.SaveChannelCache(accountId, replacement), cts.Token);
+                    using var stagedCache = await Task.Run(() => _store.StageChannelCache(accountId, replacement, cts.Token), cts.Token);
                     if (!IsCurrentLoad()) return;
+                    // The expensive protected payload/write is complete. Commit its atomic
+                    // rename and timestamp together on the dispatcher after identity checking.
+                    stagedCache.Commit();
+                    catalogCommitted = true;
                     _state.MarkSelectedPlaylistUpdated(DateTime.UtcNow);
-                    _store.Save(_state);
+                    try { _store.Save(_state); }
+                    catch (Exception exception)
+                    {
+                        timestampSaved = false;
+                        AppLogger.Error("Playlist saved, but its successful-update timestamp could not be persisted.", exception);
+                    }
                 }
                 _sourceChannels = replacement;
                 _channels = organized;
-                _searchIndex = index;
+                _searchIndex = preparedReplacement.Index;
+                _sourceDiskRevision = _store.ChannelCacheRevision(accountId);
+                _sourceCatalogRevision = CacheRevision();
+                if (!result.IsPartial)
+                    _preparedLibraries.Put(accountId, _sourceCatalogRevision, preparedReplacement);
                 await ApplyFiltersAsync();
+                if (!IsCurrentLoad()) return;
                 StatusText.Text = result.IsPartial ? result.Message + " Retry from Playlist menu." : $"Loaded {_channels.Count:N0} items";
+                SetLibraryRefreshStatus(timestampSaved ? "Playlist updated." : "Playlist saved; update time could not be saved across restart.", false);
             }
-            else StatusText.Text = $"Loaded {_channels.Count:N0} saved items";
+            else
+            {
+                StatusText.Text = $"Loaded {_channels.Count:N0} saved items";
+                SetLibraryRefreshStatus("Saved playlist ready.", false);
+            }
             AppLogger.Info("LoadChannelsAsync complete. channels=" + _channels.Count);
+            if (!IsCurrentLoad()) return;
             if (_state.EpgEnabled)
             {
                 try
@@ -1013,12 +1153,21 @@ public partial class MainWindow : Window
         }
         catch (OperationCanceledException) when (cts.IsCancellationRequested)
         {
-            if (generation == _libraryLoadGeneration) StatusText.Text = _channels.Count > 0 ? "Refresh canceled. Using saved library." : "Loading canceled. Retry or use a saved library.";
+            if (generation == _libraryLoadGeneration)
+            {
+                StatusText.Text = _channels.Count > 0 ? "Refresh canceled. Using saved library." : "Loading canceled. Retry or use a saved library.";
+                SetLibraryRefreshStatus(catalogCommitted ? "Playlist already saved before cancellation." : "Playlist refresh canceled.", false);
+            }
         }
         catch (Exception ex)
         {
             if (!IsCurrentLoad()) return;
             AppLogger.Error("Library load failed.", ex);
+            if (catalogCommitted)
+            {
+                SetLibraryRefreshStatus("Playlist saved; displaying it failed. Use saved library or Retry.", false);
+                return;
+            }
             if (updatePlaylist)
             {
                 try { await DisplaySavedLibraryAsync(); }
@@ -1027,14 +1176,18 @@ public partial class MainWindow : Window
                     AppLogger.Warn("Saved library fallback unavailable. " + AppLogger.SanitizeText(cacheException.Message));
                 }
             }
+            if (!IsCurrentLoad()) return;
             StatusText.Text = _channels.Count > 0 ? "Provider failed. Using saved library. Retry from Playlist menu." : "Provider failed. Retry from Playlist menu.";
+            SetLibraryRefreshStatus(_channels.Count > 0 ? "Refresh failed; saved playlist retained." : "Playlist failed; retry available.", false);
             SetAccountLoadingMessage("Provider unavailable: " + AppLogger.SanitizeText(ex.Message));
         }
         finally
         {
+            if (ReferenceEquals(_libraryLoadCts, cts)) _libraryLoadCts = null;
             if (generation == _libraryLoadGeneration)
             {
-                _libraryLoadCts = null;
+                CancelLibraryRefreshButton.IsEnabled = false;
+                RetryLibraryRefreshButton.IsEnabled = true;
                 if (!keepLoadingVisible) HideAccountLoading();
             }
             cts.Dispose();
@@ -1042,7 +1195,27 @@ public partial class MainWindow : Window
         async Task EnsureSavedLibraryLoadedAsync()
         {
             if (savedLoaded) return;
-            saved = await Task.Run(() => _store.LoadChannelCache(accountId), cts.Token);
+            List<Channel> loaded;
+            try
+            {
+                for (var attempt = 0; ; attempt++)
+                {
+                    savedDiskRevision = _store.ChannelCacheRevision(accountId);
+                    loaded = await Task.Run(() => _store.LoadChannelCache(accountId,
+                        (stage, duration) => AppLogger.Info($"Saved library {stage}. elapsedMs={duration.TotalMilliseconds:F1}")), cts.Token);
+                    if (!IsCurrentLoad()) return;
+                    if (savedDiskRevision == _store.ChannelCacheRevision(accountId)) break;
+                    if (attempt >= 2) throw new InvalidDataException("Saved library changed while being read; retry loading.");
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                if (!IsCurrentLoad()) return;
+                AppLogger.Warn("Saved library unavailable. " + AppLogger.SanitizeText(ex.Message));
+                loaded = [];
+            }
+            if (!IsCurrentLoad()) return;
+            saved = loaded;
             savedLoaded = true;
             if (_store.RecoveryNotice is { } recoveryNotice)
                 MessageBox.Show(this, recoveryNotice, "Saved library recovery", MessageBoxButton.OK, MessageBoxImage.Information);
@@ -1050,14 +1223,31 @@ public partial class MainWindow : Window
 
         async Task DisplaySavedLibraryAsync()
         {
-            if (_sourceChannels.Count > 0 && _channels.Count > 0) return;
-            await EnsureSavedLibraryLoadedAsync();
-            if (saved.Count == 0) return;
-            _sourceChannels = saved;
-            _channels = await Task.Run(() => LibraryOrganization.Apply(saved, _state.SelectedLibrary), cts.Token);
-            _searchIndex = await Task.Run(() => new MediaSearchIndex(_channels), cts.Token);
+            var diskRevision = _store.ChannelCacheRevision(accountId);
+            var prepared = _preparedLibraries.Get(accountId, PreparedLibraryCache.Revision(account, organization, diskRevision));
+            var reused = prepared is not null;
+            if (reused) savedDiskRevision = diskRevision;
+            if (prepared is null)
+            {
+                await EnsureSavedLibraryLoadedAsync();
+                if (!IsCurrentLoad() || saved.Count == 0) return;
+                var organized = await Task.Run(() => LibraryOrganization.Apply(saved, organization, cts.Token), cts.Token);
+                prepared = await Task.Run(() => new PreparedLibrary(saved, organized, new MediaSearchIndex(organized, cts.Token)), cts.Token);
+            }
             if (!IsCurrentLoad()) return;
+            if (savedDiskRevision != _store.ChannelCacheRevision(accountId)) return;
+            saved = prepared.Source;
+            savedLoaded = true;
+            _sourceChannels = prepared.Source;
+            _channels = prepared.Channels;
+            _searchIndex = prepared.Index;
+            _sourceCatalogRevision = CacheRevision();
+            _sourceDiskRevision = savedDiskRevision;
+            if (!reused) _preparedLibraries.Put(accountId, CacheRevision(), prepared);
             await ApplyFiltersAsync();
+            if (!IsCurrentLoad()) return;
+            HideAccountLoading();
+            AppLogger.Info($"Saved library usable. items={_channels.Count}; preparedReuse={reused}; elapsedMs={timer.Elapsed.TotalMilliseconds:F1}; retainedBytes={_preparedLibraries.RetainedBytes}");
             if (_state.EpgEnabled)
             {
                 try
@@ -1076,6 +1266,21 @@ public partial class MainWindow : Window
         }
 
         bool IsCurrentLoad() => generation == _libraryLoadGeneration && accountId == _state.SelectedAccountId && !cts.IsCancellationRequested;
+        string CacheRevision() => PreparedLibraryCache.Revision(account, organization, _store.ChannelCacheRevision(accountId));
+    }
+
+    private void SetLibraryRefreshStatus(string message, bool busy)
+    {
+        var updated = _state.EnsureSelectedAccount().LastPlaylistUpdatedUtc;
+        LibraryRefreshStatusText.Text = message + (updated.HasValue ? $" Last successful update: {updated.Value.ToLocalTime():g}" : " No successful update yet.");
+        CancelLibraryRefreshButton.IsEnabled = busy;
+        RetryLibraryRefreshButton.IsEnabled = !busy;
+    }
+
+    private void ToggleBackgroundPlaylistRefresh_Click(object sender, RoutedEventArgs e)
+    {
+        _state.EnsureSelectedAccount().BackgroundPlaylistRefresh = BackgroundPlaylistRefreshMenuItem.IsChecked;
+        _store.Save(_state);
     }
 
     private void CancelLibraryLoad_Click(object sender, RoutedEventArgs e)
@@ -1089,31 +1294,12 @@ public partial class MainWindow : Window
 
     private async void UseSavedLibrary_Click(object sender, RoutedEventArgs e)
     {
-        _libraryLoadCts?.Cancel();
-        HideAccountLoading();
-        var accountId = _state.SelectedAccountId;
-        try
+        if (!_store.HasChannelCacheForAccount(_state.SelectedAccountId))
         {
-            var saved = await Task.Run(() => _store.LoadChannelCache(accountId));
-            if (accountId != _state.SelectedAccountId) return;
-            if (saved.Count == 0)
-            {
-                StatusText.Text = "No saved library is available. Retry the provider.";
-                return;
-            }
-            var organized = await Task.Run(() => LibraryOrganization.Apply(saved, _state.SelectedLibrary));
-            var index = await Task.Run(() => new MediaSearchIndex(organized));
-            if (accountId != _state.SelectedAccountId) return;
-            _sourceChannels = saved;
-            _channels = organized;
-            _searchIndex = index;
-            await ApplyFiltersAsync();
-            StatusText.Text = $"Using {_channels.Count:N0} saved items.";
+            StatusText.Text = "No saved library is available. Retry the provider.";
+            return;
         }
-        catch (Exception ex)
-        {
-            StatusText.Text = "Saved library unavailable: " + AppLogger.SanitizeText(ex.Message);
-        }
+        await LoadChannelsAsync(false, allowProvider: false);
     }
 
     private void ShowAccountLoading(string message)
@@ -1160,6 +1346,9 @@ public partial class MainWindow : Window
 
     private void HideAccountLoading()
     {
+        // A refresh with an already usable catalog owns no overlay. Do not alter
+        // the native host (including a paused/buffering player) in that case.
+        if (AccountLoadingOverlay.Visibility != Visibility.Visible) return;
         _loadingTimer.Stop();
         AccountLoadingOverlay.Visibility = Visibility.Collapsed;
         if (_mediaPlayer?.IsPlaying == true)
@@ -1180,6 +1369,9 @@ public partial class MainWindow : Window
 
     private async Task ApplyFiltersAsync()
     {
+        var accountId = _state.SelectedAccountId;
+        var generation = _libraryLoadGeneration;
+        var filterGeneration = ++_filterGeneration;
         MediaKind? kind = _mediaKindMode switch
         {
             1 => MediaKind.Live,
@@ -1205,6 +1397,8 @@ public partial class MainWindow : Window
         var activeFavoriteFolderId = viewMode == 1 ? _activeFavoriteFolderId : null;
         var recentUrls = (HashSet<string>?)null;
         var library = _state.SelectedLibrary;
+        var groupOrganization = PreparedLibraryCache.SnapshotOrganization(library).GroupOrganization;
+        var favoriteIds = library.FavoriteIds.ToList();
         var seriesEpisodes = _activeSeriesEpisodes;
         var activeSeason = _activeSeason;
         var vodSort = _vodSort;
@@ -1220,10 +1414,10 @@ public partial class MainWindow : Window
                     ? BuildHistoryFilterResult(library, channels, search, kind, viewMode == 3, cts.Token)
                     : seriesEpisodes is not null
                     ? BuildSeriesFilterResult(seriesEpisodes, search, activeSeason, cts.Token)
-                    : BuildFilterResult(channels, searchIndex, search, kind, activeFolder, activeLetter, browseMode, favorites, recentUrls, favoriteFolders, activeFavoriteFolderId, vodSort, library.FavoriteIds, library.GroupOrganization, cts.Token),
+                    : BuildFilterResult(channels, searchIndex, search, kind, activeFolder, activeLetter, browseMode, favorites, recentUrls, favoriteFolders, activeFavoriteFolderId, vodSort, favoriteIds, groupOrganization, cts.Token),
                 cts.Token);
 
-            if (!ReferenceEquals(_filterCts, cts) || cts.IsCancellationRequested) return;
+            if (!IsCurrentFilter()) return;
 
             _filteredChannels = result.FilteredChannels;
             _visibleChannels = result.VisibleChannels;
@@ -1257,13 +1451,13 @@ public partial class MainWindow : Window
             _displayedCatalogScope = scope;
             SelectChannelInVisibleList(selectedBeforeRefresh);
             if (priorOffset is { } retainedOffset)
-                _ = Dispatcher.BeginInvoke(() => FindChannelScrollViewer()?.ScrollToVerticalOffset(retainedOffset), DispatcherPriority.Loaded);
+                _ = Dispatcher.BeginInvoke(() => { if (IsCurrentFilter()) FindChannelScrollViewer()?.ScrollToVerticalOffset(retainedOffset); }, DispatcherPriority.Loaded);
             if (_pendingLibraryRestore is { } position)
             {
                 _pendingLibraryRestore = null;
                 var index = LibraryNavigationHistory.SelectedIndex(_visibleChannels, position.SelectedKey, ItemIdentity.For);
                 if (index >= 0) ChannelList.SelectedIndex = index;
-                _ = Dispatcher.BeginInvoke(() => FindChannelScrollViewer()?.ScrollToVerticalOffset(position.ScrollOffset), DispatcherPriority.Loaded);
+                _ = Dispatcher.BeginInvoke(() => { if (IsCurrentFilter()) FindChannelScrollViewer()?.ScrollToVerticalOffset(position.ScrollOffset); }, DispatcherPriority.Loaded);
             }
             UpdateEmptyState();
             if (!string.IsNullOrWhiteSpace(result.StatusText))
@@ -1284,6 +1478,10 @@ public partial class MainWindow : Window
 
             cts.Dispose();
         }
+
+        // Deferred scroll callbacks run after this source has been disposed.
+        bool IsCurrentFilter() => accountId == _state.SelectedAccountId && generation == _libraryLoadGeneration &&
+            filterGeneration == _filterGeneration && ReferenceEquals(channels, _channels) && !cts.IsCancellationRequested;
     }
 
     private static FilterResult BuildHistoryFilterResult(AccountLibraryState library, IReadOnlyList<Channel> catalog,
@@ -1766,6 +1964,7 @@ public partial class MainWindow : Window
 
     private void ClearActiveSeries()
     {
+        _activeSeriesRevision = string.Empty;
         _activeSeriesId = null;
         _activeSeriesName = null;
         _activeSeriesEpisodes = null;
@@ -2149,8 +2348,9 @@ public partial class MainWindow : Window
     {
         if (channel is null) return;
 
+        var selectedKey = ItemIdentity.For(channel);
         var index = _visibleChannels.FindIndex(visible =>
-            string.Equals(visible.Id, channel.Id, StringComparison.OrdinalIgnoreCase));
+            string.Equals(ItemIdentity.For(visible), selectedKey, StringComparison.OrdinalIgnoreCase));
         var match = index >= 0 ? _visibleEntries[index] : null;
         if (match is not null)
         {
@@ -2296,6 +2496,7 @@ public partial class MainWindow : Window
             _activeSeriesName = seriesName;
             _activeSeriesEpisodes = episodes.OrderBy(episode => ViewingHistory.EpisodeOrder(episode).Season)
                 .ThenBy(episode => ViewingHistory.EpisodeOrder(episode).Episode).ThenBy(episode => episode.Name).ToList();
+            _activeSeriesRevision = PreparedLibraryCache.Revision(account, new(), _store.ChannelCacheRevision(accountId));
             _activeSeason = null;
             SeasonPicker.Items.Clear();
             SeasonPicker.Items.Add("All seasons");
@@ -2320,6 +2521,9 @@ public partial class MainWindow : Window
         }
         finally
         {
+            // Only the owning request may clear the field: a newer series load
+            // can already be running when this canceled request finishes.
+            if (ReferenceEquals(_seriesLoadCts, cts)) _seriesLoadCts = null;
             if (generation == _seriesLoadGeneration) Cursor = null;
             cts.Dispose();
         }
@@ -3800,6 +4004,10 @@ public partial class MainWindow : Window
 
     private void ClearCache_Click(object sender, RoutedEventArgs e)
     {
+        _libraryLoadCts?.Cancel();
+        ++_libraryLoadGeneration;
+        HideAccountLoading();
+        _preparedLibraries.Remove(_state.SelectedAccountId);
         _store.ClearChannelCache(_state.SelectedAccountId);
         var account = _state.EnsureSelectedAccount();
         account.LastPlaylistUpdatedUtc = null;
@@ -3850,6 +4058,21 @@ public partial class MainWindow : Window
             MessageBoxImage.Information);
     }
 
+    private void OpenLogsFolder_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            Directory.CreateDirectory(AppDataPaths.Logs);
+            Process.Start(new ProcessStartInfo(AppDataPaths.Logs) { UseShellExecute = true });
+        }
+        catch (Exception exception)
+        {
+            AppLogger.Error("Could not open the logs folder.", exception);
+            MessageBox.Show("Could not open the logs folder. Logs are stored here:\n\n" + AppDataPaths.Logs,
+                "Logs", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+    }
+
     private void GitHub_Click(object sender, RoutedEventArgs e)
     {
         Process.Start(new ProcessStartInfo(GitHubProjectUrl) { UseShellExecute = true });
@@ -3867,6 +4090,13 @@ public partial class MainWindow : Window
     private async void CheckForUpdates_Click(object sender, RoutedEventArgs e)
     {
         await CheckForUpdatesAsync(showUpToDateMessage: true);
+    }
+
+    private void ToggleAutomaticUpdateDownload_Click(object sender, RoutedEventArgs e)
+    {
+        _state.DownloadUpdatesAutomatically = AutomaticUpdateDownloadMenuItem.IsChecked;
+        _store.Save(_state);
+        StatusText.Text = _state.DownloadUpdatesAutomatically ? "Signed updates will download when an update is offered. Restart always requires your choice." : "Automatic update downloads disabled.";
     }
 
     private async Task CheckForUpdatesAsync(bool showUpToDateMessage)
@@ -3901,8 +4131,19 @@ public partial class MainWindow : Window
             }
 
             AppLogger.Info($"Update available. current={_updateService.CurrentVersion}; latest={release.DisplayVersion}");
-            var updateWindow = new UpdateWindow(_updateService.CurrentVersion, release) { Owner = this };
-            updateWindow.ShowDialog();
+            if (_isShuttingDown) return;
+            var updateWindow = new UpdateWindow(_updateService.CurrentVersion, release, _state.DownloadUpdatesAutomatically, _stagedUpdate?.Manifest.Tag == release.DisplayVersion ? _stagedUpdate : null) { Owner = this };
+            if (_state.DownloadUpdatesAutomatically)
+            {
+                // A modeless offer lets normal browsing/playback continue throughout automatic staging.
+                updateWindow.IsModelessPrompt = true;
+                var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                updateWindow.Closed += (_, _) => closed.TrySetResult();
+                updateWindow.Show();
+                await closed.Task;
+            }
+            else updateWindow.ShowDialog();
+            _stagedUpdate = updateWindow.StagedUpdate ?? _stagedUpdate;
 
             switch (updateWindow.PromptResult)
             {
@@ -3913,22 +4154,16 @@ public partial class MainWindow : Window
                     StatusText.Text = "Automatic update reminders disabled.";
                     break;
                 case UpdatePromptResult.UpdateNow:
-                    try
+                    if (updateWindow.StagedUpdate is not { } staged) break;
+                    if (!CanRestartForUpdate())
                     {
-                        Process.Start(new ProcessStartInfo(release.PageUri.AbsoluteUri) { UseShellExecute = true });
-                        StatusText.Text = "Opened the latest release on GitHub.";
+                        StatusText.Text = "Update ready. Stop playback and finish recording before restarting to update.";
+                        MessageBox.Show(this, "The update is ready. Stop playback and finish recording, then check for updates again and choose Restart to update.", "Update ready", MessageBoxButton.OK, MessageBoxImage.Information);
+                        break;
                     }
-                    catch (Exception ex)
-                    {
-                        AppLogger.Error("Could not open the GitHub release page.", ex);
-                        StatusText.Text = "Could not open the GitHub release page.";
-                        MessageBox.Show(
-                            this,
-                            "Windows could not open the release page. You can download the update manually from:\n\n" + release.PageUri.AbsoluteUri,
-                            "Could not open update",
-                            MessageBoxButton.OK,
-                            MessageBoxImage.Warning);
-                    }
+                    if (_isShuttingDown) break;
+                    StartUpdateHelper(staged, release);
+                    Close();
                     break;
                 default:
                     StatusText.Text = "Update postponed until a later startup.";
@@ -3956,6 +4191,27 @@ public partial class MainWindow : Window
         }
     }
 
+    private bool CanRestartForUpdate() => !_isShuttingDown && !_playbackState.HasActiveRequest && _multiViewWindow is null &&
+        !(_recordingService?.ActiveCount > 0) && _recordingTransitionTask is not { IsCompleted: false } && _recordingStopTask is not { IsCompleted: false };
+
+    private void StartUpdateHelper(StagedUpdate staged, GitHubReleaseInfo release)
+    {
+        var runner = Path.Combine(staged.Directory, "runner-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(runner);
+        foreach (var name in new[] { AuthenticatedUpdate.HelperExe, "ClassicWindowsIptvPlayer.Updater.dll", "ClassicWindowsIptvPlayer.Updater.deps.json", "ClassicWindowsIptvPlayer.Updater.runtimeconfig.json", "ClassicWindowsIptvPlayer.Core.dll" })
+        {
+            var source = Path.Combine(AppContext.BaseDirectory, name);
+            if (!File.Exists(source) && name == AuthenticatedUpdate.HelperExe) throw new IOException("This installation does not include the updater helper. Open the release on GitHub and install the next build manually first.");
+            if (File.Exists(source)) File.Copy(source, Path.Combine(runner, name));
+        }
+        var job = new UpdateJob(staged.Directory, Path.GetFullPath(AppContext.BaseDirectory), AppDataPaths.Root, Environment.ProcessId, _updateService.CurrentVersion.ToString(), release.DisplayVersion);
+        var jobPath = Path.Combine(staged.Directory, "update-job.json");
+        File.WriteAllBytes(jobPath, System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(job));
+        var start = new ProcessStartInfo(Path.Combine(runner, AuthenticatedUpdate.HelperExe)) { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = runner };
+        start.ArgumentList.Add("--apply"); start.ArgumentList.Add(jobPath);
+        using var helper = Process.Start(start) ?? throw new IOException("The updater could not start. Your current app is still running.");
+        StatusText.Text = "Closing normally to install the verified update...";
+    }
     private async void ChangeAccount_Click(object sender, RoutedEventArgs e)
     {
         if (_isChangingAccount) return;
@@ -3996,6 +4252,7 @@ public partial class MainWindow : Window
             _seriesLoadCts?.Cancel();
             ++_libraryLoadGeneration;
             ++_seriesLoadGeneration;
+            RememberAccountBrowsePosition();
             ResetAccountView();
 
             // The account manager uses its own AppState instance and may have added
@@ -4010,8 +4267,11 @@ public partial class MainWindow : Window
 
             InitializeBufferBox();
             InitializeVolumeControls();
-            await LoadChannelsAsync(result.UpdatePlaylist);
-            AppLogger.Info("Account changed successfully. accountId=" + result.AccountId);
+            RestoreAccountBrowsePosition();
+            // The load handles its own failures. Do not keep account management
+            // locked while a background provider response is pending.
+            _ = LoadChannelsAsync(result.UpdatePlaylist || selectedAccount.BackgroundPlaylistRefresh);
+            AppLogger.Info("Account opened; library load started. accountId=" + result.AccountId);
         }
         catch (Exception ex)
         {
@@ -4037,14 +4297,73 @@ public partial class MainWindow : Window
             updated.SelectedAccountId = playingAccountId;
             ViewingHistory.Merge(updated.SelectedLibrary, currentLibrary);
         }
+        var previousRevision = PreparedLibraryCache.Revision(_state.Account,
+            PreparedLibraryCache.SnapshotOrganization(currentLibrary), _store.ChannelCacheRevision(playingAccountId));
+        var updatedRevision = PreparedLibraryCache.Revision(updated.Account,
+            PreparedLibraryCache.SnapshotOrganization(updated.SelectedLibrary), _store.ChannelCacheRevision(playingAccountId));
+        if (previousRevision != updatedRevision)
+        {
+            _libraryLoadCts?.Cancel();
+            ++_libraryLoadGeneration;
+            ++_libraryLoadRequest;
+            SetLibraryRefreshStatus("Account changed; refresh again to use its new settings.", false);
+        }
         _state = updated;
         _store.Save(_state);
     }
 
+    private void RememberAccountBrowsePosition()
+    {
+        _accountBrowsePositions.Remove(_state.SelectedAccountId);
+        if (_accountBrowsePositions.Count >= 3) _accountBrowsePositions.Remove(_accountBrowsePositions.Keys.First());
+        _accountBrowsePositions[_state.SelectedAccountId] = new(CaptureLibraryPosition(), _libraryHistory,
+            _mediaKindMode, SearchBox.Text, _activeSeriesId, _activeSeriesName, _activeSeriesEpisodes, _activeSeason, _vodSort,
+            _activeSeriesEpisodes is null ? PreparedLibraryCache.Revision(_state.Account, new(), _store.ChannelCacheRevision(_state.SelectedAccountId)) : _activeSeriesRevision);
+    }
+
+    private void RestoreAccountBrowsePosition()
+    {
+        if (!_accountBrowsePositions.TryGetValue(_state.SelectedAccountId, out var saved)) return;
+        if (saved.Revision != PreparedLibraryCache.Revision(_state.Account, new(), _store.ChannelCacheRevision(_state.SelectedAccountId)))
+            saved = saved with { SeriesId = null, SeriesName = null, Episodes = null, Season = null };
+        _libraryHistory = saved.History;
+        _mediaKindMode = saved.MediaKind;
+        _browseMode = saved.Position.BrowseMode;
+        _viewMode = saved.Position.ViewMode;
+        _activeFolder = saved.Position.Folder;
+        _activeFavoriteFolderId = saved.Position.FavoriteFolder;
+        _activeLetter = saved.Position.Letter;
+        _activeSeriesId = saved.SeriesId;
+        _activeSeriesName = saved.SeriesName;
+        _activeSeriesEpisodes = saved.Episodes;
+        _activeSeriesRevision = saved.Revision;
+        _activeSeason = saved.Season;
+        _vodSort = saved.Sort;
+        VodSortPicker.SelectedIndex = (int)saved.Sort;
+        SeasonPicker.Items.Clear();
+        SeasonPicker.Visibility = saved.Episodes is null ? Visibility.Collapsed : Visibility.Visible;
+        if (saved.Episodes is not null)
+        {
+            SeasonPicker.Items.Add("All seasons");
+            foreach (var season in saved.Episodes.Select(episode => ViewingHistory.EpisodeOrder(episode).Season)
+                         .Where(value => value != int.MaxValue).Distinct().OrderBy(value => value))
+                SeasonPicker.Items.Add("Season " + season);
+            SeasonPicker.SelectedItem = saved.Season is { } selectedSeason ? "Season " + selectedSeason : "All seasons";
+        }
+        SearchBox.Text = saved.Search;
+        _pendingLibraryRestore = saved.Position;
+        UpdateMediaKindButtons();
+        UpdateViewModeButtons();
+        UpdateSearchScopeButtons();
+    }
+
     private void ResetAccountView()
     {
+        _libraryHistory = new();
+        _pendingLibraryRestore = null;
         ClearCatchup();
         _filterCts?.Cancel();
+        ++_filterGeneration;
         _sourceProbeCts?.Cancel();
         _sourceProbeCts?.Dispose();
         _sourceProbeCts = null;
@@ -4060,6 +4379,8 @@ public partial class MainWindow : Window
         _searchIndex = null;
         _channels = [];
         _sourceChannels = [];
+        _sourceCatalogRevision = string.Empty;
+        _sourceDiskRevision = string.Empty;
         _filteredChannels = [];
         _visibleChannels = [];
         _visibleEntries = [];
@@ -4069,6 +4390,7 @@ public partial class MainWindow : Window
         _activeSeriesId = null;
         _activeSeriesName = null;
         _activeSeriesEpisodes = null;
+        _activeSeriesRevision = string.Empty;
 
         SearchBox.Clear();
         ChannelList.ItemsSource = null;
@@ -4154,7 +4476,7 @@ public partial class MainWindow : Window
         Uri? endpoint = AppState.TryValidateFeedbackEndpoint(state.FeedbackEndpoint, out var configured)
             ? configured
             : null;
-        var directory = Path.Combine(AppContext.BaseDirectory, "cache");
+        var directory = AppDataPaths.Cache;
         Directory.CreateDirectory(directory);
         return new FeedbackOutbox(Path.Combine(directory, "feedback-outbox.dat"), endpoint);
     }
@@ -4183,7 +4505,8 @@ public partial class MainWindow : Window
             var queued = await _feedbackOutbox.GetPendingAsync();
             var previous = queued.FirstOrDefault(item => item.Type == "feedback");
             FeedbackWindow? dialog = null;
-            dialog = new FeedbackWindow((message, includeLogs) => SendFeedbackAsync(message, includeLogs, dialog!), previous?.Message) { Owner = this };
+            dialog = new FeedbackWindow((message, includeLogs) => SendFeedbackAsync(message, includeLogs, dialog!), previous?.Message,
+                includeLogs: previous is null || previous.Log is not null) { Owner = this };
             dialog.ShowDialog();
         }
         catch

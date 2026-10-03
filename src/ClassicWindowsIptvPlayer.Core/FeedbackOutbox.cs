@@ -211,6 +211,15 @@ public sealed partial class FeedbackOutbox : IDisposable
         finally { _gate.Release(); }
     }
 
+    internal static void ValidateMigrationStorage(string path)
+    {
+        var clear = WindowsDataProtection.Unprotect(File.ReadAllBytes(path), Entropy);
+        var items = JsonSerializer.Deserialize<List<FeedbackQueueItem>>(clear, JsonOptions)
+            ?? throw new InvalidDataException("Feedback queue is empty or invalid.");
+        if (items.Any(item => item is null || string.IsNullOrWhiteSpace(item.Id) || item.Type is not ("feedback" or "crash")))
+            throw new InvalidDataException("Feedback queue has invalid entries.");
+    }
+
     private List<FeedbackQueueItem> Load()
     {
         if (!File.Exists(_path)) return [];

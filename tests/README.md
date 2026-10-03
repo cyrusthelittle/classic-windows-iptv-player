@@ -78,3 +78,19 @@ The isolated WPF checks use controlled fixtures and no provider access.
 ## Opt-in crash reports and feedback
 
 The Core regression suite exercises the feedback queue with an injected local `HttpMessageHandler`; it does not contact the configured webhook. It checks crash payloads and both feedback payload forms: `{ type, message }` when logs are excluded, and `{ type, message, log }` when the selected-by-default Feedback checkbox includes redacted logs. It also checks HTTPS endpoint validation and protected settings, DPAPI-protected queue persistence, crash-log redaction, UTF-8 byte limits, no-endpoint behavior, and failed delivery followed by explicit retry with the log choice retained. Crash-session marker checks distinguish normal shutdown from an interrupted session and confirm session logs are retained. Interactive production-app checks of the checkbox, next-launch crash prompt, its Send/Later/Don't send actions, and the Feedback menu's send/retry display remain manual.
+
+## Faster saved libraries (Step 27)
+
+The normal Core regression runner includes prepared-catalog reuse, immutable organization snapshots, provider/catalog/organization invalidation, LRU eviction and retained-memory budget checks. Add `-- --prepared-library` to run isolated protected disk-cache benchmarks with invented 50,000- and 150,000-item catalogs. Use the build override `-p:DefaultItemExcludesInProjectFolder=**/artifacts/**` when the existing nested generated artifacts are present.
+
+`ClassicWindowsIptvPlayer.LibraryLoadingUiChecks` runs the real MainWindow loader and dispatcher/ListBox bindings in a temporary staging directory, using invented accounts and protected caches. It checks cold and warm account loads, exact index reuse, overlapping obsolete requests, organization/catalog invalidation, cached startup overlay removal, selection restoration and a second OS process reading persisted caches/favorites. It does not show the window, contact providers or initialize native playback; physical rendering, scrolling and provider/native playback remain manual checks.
+
+## Saved-data migration (Step 30)
+
+The normal Core regression runner includes 33 migration assertions using invented state and separate temporary executable/local-app-data directories. It verifies same-user DPAPI continuity, protected legacy plaintext cache primaries/backups and recovery snapshots, unchanged read-only source bytes, recording paths, pending feedback, session markers, staging failure/retry and established-root precedence. It also checks first-run retry markers, pinned explicit roots, portable mode and runtime data-root lease ownership. Existing Windows harnesses set an isolated absolute override before touching App, AppLogger or ConfigStore. See `docs/SAVED_DATA.md` for storage/migration/rollback policy.
+
+These fixtures do not launch an old-version-to-new-version production upgrade, observe rendered startup failure dialogs, interrupt an actual migration process, simulate directory ACL denial or specifically mutate legacy sources/reparse points during copying. Those acceptance checks remain manual; no real provider/account data is used by this suite.
+
+## Acceptance follow-up (3 October 2026)
+
+Step 25's production Settings fixture now also saves light/dark WPF bitmaps, checks dark notice-text contrast at 4.5:1 or better, and uses a generated finite local WAV classified as Live to verify native positive-length slider seeking and cursor retention after release. The final run passed 42 assertions. This complements the 10 HLS buffered-seek/time-label checks; it does not reproduce a positive-length HLS provider or physical pointer dragging. See tests/ClassicWindowsIptvPlayer.FeedbackUiChecks/README.md for the new crash/feedback production-dialog harness and its isolated in-memory delivery contract.

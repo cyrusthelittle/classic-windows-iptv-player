@@ -20,7 +20,7 @@
     <VlcWindowsX86Enabled>false</VlcWindowsX86Enabled>
     <VlcWindowsArm64Enabled>false</VlcWindowsArm64Enabled>
     <!-- App UI is English-only; skip the localized WPF resource DLLs (13 language folders) -->
-    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages><DefaultItemExcludes>$(DefaultItemExcludes);**/artifacts/**</DefaultItemExcludes>
   </PropertyGroup>
   <ItemGroup>
     <!-- Not needed at runtime: .lib link stubs, binaural-audio profiles, and lua scripts
@@ -31,9 +31,15 @@
   <ItemGroup>
     <Resource Include="Assets\ClassicWindowsIptvPlayer.ico" />
     <Resource Include="Assets\iptv-logo.png" />
-    <ProjectReference Include="..\ClassicWindowsIptvPlayer.Core\ClassicWindowsIptvPlayer.Core.csproj" />
+    <ProjectReference Include="..\ClassicWindowsIptvPlayer.Core\ClassicWindowsIptvPlayer.Core.csproj" /><ProjectReference Include="..\ClassicWindowsIptvPlayer.Updater\ClassicWindowsIptvPlayer.Updater.csproj" ReferenceOutputAssembly="false" />
     <PackageReference Include="LibVLCSharp.WPF" Version="3.9.7.1" />
     <PackageReference Include="LibVLCSharp.WinForms" Version="3.9.7.1" />
     <PackageReference Include="VideoLAN.LibVLC.Windows" Version="3.0.23.1" />
   </ItemGroup>
-</Project>
+  <Target Name="CopyUpdaterHelper" AfterTargets="Build">
+    <ItemGroup><UpdaterFiles Include="../ClassicWindowsIptvPlayer.Updater/bin/$(Configuration)/net10.0-windows/win-x64/ClassicWindowsIptvPlayer.Updater.*" /></ItemGroup>
+    <Copy SourceFiles="@(UpdaterFiles)" DestinationFolder="$(TargetDir)" />
+  </Target>
+  <Target Name="PublishUpdaterHelper" AfterTargets="Publish">
+    <MSBuild Projects="../ClassicWindowsIptvPlayer.Updater/ClassicWindowsIptvPlayer.Updater.csproj" Targets="Publish" Properties="Configuration=$(Configuration);PublishDir=$(PublishDir);SelfContained=$(SelfContained);RuntimeIdentifier=win-x64;PublishSingleFile=true;IncludeNativeLibrariesForSelfExtract=true" />
+  </Target></Project>

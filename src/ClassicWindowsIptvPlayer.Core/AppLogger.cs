@@ -12,9 +12,9 @@ public static class AppLogger
 {
     private const long MaxLogBytes = 5 * 1024 * 1024;
     private static readonly object Sync = new();
-    private static readonly string LogDirectory = PreparePortableLogDirectory();
+    private static readonly Lazy<string> LogDirectory = new(PreparePortableLogDirectory);
 
-    private static readonly string LogPath = Path.Combine(LogDirectory, "app.log");
+    private static string LogPath => Path.Combine(LogDirectory.Value, "app.log");
     private static readonly Regex UrlPattern = new(@"https?://[^\s<>""']+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex SecretAssignment = new(@"(?<![\w])(?<key>[\w%-]+)(?<separator>\s*(?:=|%3d|:\s+)\s*)(?<value>""[^""\r\n]*""|'[^'\r\n]*'|[^\s&;,<>""']+)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex XtreamPath = new(@"/(?:(?:live|movie|series)/)?[^/\s?#]+/[^/\s?#]+/\d+(?:\.[^/\s?#]+)?", RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -28,7 +28,7 @@ public static class AppLogger
 
     private static string PreparePortableLogDirectory()
     {
-        var logsRoot = Path.Combine(AppContext.BaseDirectory, "logs");
+        var logsRoot = AppDataPaths.Logs;
         try
         {
             Directory.CreateDirectory(logsRoot);
@@ -100,7 +100,7 @@ public static class AppLogger
         {
             lock (Sync)
             {
-                Directory.CreateDirectory(LogDirectory);
+                Directory.CreateDirectory(LogDirectory.Value);
                 RotateIfNeeded();
 
                 var sb = new StringBuilder();
@@ -126,7 +126,7 @@ public static class AppLogger
         var info = new FileInfo(LogPath);
         if (info.Length < MaxLogBytes) return;
 
-        var backupPath = Path.Combine(LogDirectory, "app.previous.log");
+        var backupPath = Path.Combine(LogDirectory.Value, "app.previous.log");
         if (File.Exists(backupPath)) File.Delete(backupPath);
         File.Move(LogPath, backupPath);
     }

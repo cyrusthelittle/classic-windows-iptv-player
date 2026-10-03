@@ -108,7 +108,8 @@ public sealed class AccountEditingSession
         Id = source.Id,
         Name = source.Name,
         Settings = source.Settings.Clone(),
-        LastPlaylistUpdatedUtc = source.LastPlaylistUpdatedUtc
+        LastPlaylistUpdatedUtc = source.LastPlaylistUpdatedUtc,
+        BackgroundPlaylistRefresh = source.BackgroundPlaylistRefresh
     };
 }
 
