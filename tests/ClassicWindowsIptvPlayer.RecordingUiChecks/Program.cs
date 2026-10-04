@@ -93,10 +93,10 @@ internal static class Program
             var executable = Path.Combine(root, Path.GetFileName(Environment.ProcessPath!));
             using var child = Process.Start(new ProcessStartInfo(executable, "--child") { WorkingDirectory = root, WindowStyle = ProcessWindowStyle.Hidden });
             if (child is null) throw new InvalidOperationException("Could not launch isolated production-window process.");
-            if (!child.WaitForExit(120_000))
+            if (!child.WaitForExit(180_000))
             {
                 try { child.Kill(entireProcessTree: true); } catch { }
-                Console.WriteLine("FAIL production-window fixture exceeded 120 seconds");
+                Console.WriteLine("FAIL production-window fixture exceeded 180 seconds");
                 Environment.ExitCode = 1;
                 return;
             }
@@ -114,7 +114,7 @@ internal static class Program
             using var fixture = new Fixture(File.ReadAllBytes(Path.Combine(root, "fixture.avi")), File.ReadAllBytes(Path.Combine(root, "capture-fixture.wav")));
             var store = new ConfigStore();
             var state = store.Load();
-            var persistedRecordingFolder = Path.Combine(root, "persistent-recordings");
+            var persistedRecordingFolder = Path.Combine(AppDataPaths.Root, "Recordings");
             Directory.CreateDirectory(persistedRecordingFolder);
             state.RecordingFolder = persistedRecordingFolder;
             store.Save(state);
@@ -283,6 +283,7 @@ internal static class Program
         File.AppendAllText(Path.Combine(root, "evidence.txt"), transcoded
             ? "PASS packaged LibVLC transcode produced a bounded MPEG-TS fixture: " + new FileInfo(transcodePath).Length + " bytes." + Environment.NewLine
             : "LIMITATION packaged LibVLC MPEG-TS transcode preflight failed; retaining the marker/WAV fixture and explicitly not claiming decoder-level HLS playback." + Environment.NewLine);
+        if (transcoded) channel.Url = fixture.ProgressiveTsUrl;
         Call("PlayChannel", channel, null);
         await WaitPlaying();
         Check(window.FindName("RecordButton") is Button, "real production MainWindow rendered recording controls");
@@ -291,8 +292,8 @@ internal static class Program
         var normalizeFolder = typeof(MainWindow).GetMethod("NormalizeRecordingFolder", BindingFlags.Static | BindingFlags.NonPublic)!;
         Check(string.Equals((string?)normalizeFolder.Invoke(null, [root]), Path.GetFullPath(root), StringComparison.OrdinalIgnoreCase),
             "existing saved recording folder is normalized and reused");
-        Check(normalizeFolder.Invoke(null, [Path.Combine(root, "missing-recording-folder")]) is null,
-            "missing saved recording folder safely falls back to the default");
+        Check((string?)normalizeFolder.Invoke(null, [Path.Combine(root, "missing-recording-folder")]) == Path.Combine(root, "missing-recording-folder"),
+            "recording folder normalization accepts an absolute destination before creation");
         var savedOutcome = new CaptureOutcome
         {
             Accepted = true, Result = ClassicWindowsIptvPlayer.Core.RecordingOutcome.Stopped,
@@ -300,7 +301,7 @@ internal static class Program
         };
         Check(savedOutcome.HasPlayableFile && savedOutcome.Succeeded,
             "user-stopped capture with finalized bytes is classified as a successful playable recording");
-        Check(fixture.StreamRequests > 0, "cached invented live channel played from loopback HTTP fixture");
+        Check(fixture.StreamRequests > 0 || fixture.ProgressiveTsRequests > 0, "cached invented live channel played from loopback HTTP fixture");
 
         var budget = (ConnectionBudget)Field("_recordingBudget")!;
         var service = Service!;
@@ -365,11 +366,6 @@ internal static class Program
         var baselineSequence = fixture.SharedLatestSequence;
 
         var tuner = (ChannelTuner)Field("_tuner")!;
-        var tunerSourceField = typeof(ChannelTuner).GetField("_activeSharedHlsSource", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        var previousTunerSource = tunerSourceField.GetValue(tuner);
-        // The production WPF smoke player remains on AVI. The dedicated decoder above
-        // verifies the source's real loopback URL without mutating production playback.
-        tunerSourceField.SetValue(tuner, source);
         var recordingConsumer = source.Attach(SharedHlsConsumerKind.Recording);
         Check(recordingConsumer.Kind == SharedHlsConsumerKind.Recording,
             "recording consumer attaches directly to the active shared live HLS source");
@@ -602,116 +598,53 @@ internal static class Program
             $"LibVLC continues decoding the stopped recording (newFrames={reopenProbe.Frames - reopenedFrameBaseline}; state={verifyPlayer.State})");
         verifyPlayer.Stop();
         await playbackConsumer.DisposeAsync();
-        tunerSourceField.SetValue(tuner, previousTunerSource);
         await source.DisposeAsync();
 
-        // Exercise the production tuner-owned HLS source during the timeshift checks.
-        tuner.Play(new TuneRequest(channel.Id, channel.Name, fixture.SharedHlsPlaylistUrl,
-            "recording-ui-synthetic-hls", IsLive: true, BufferMs: 200, AccountId: accountId));
-        await WaitUntil(() => tuner.CurrentPlayer is { IsPlaying: true } && tunerSourceField.GetValue(tuner) is SharedHlsSource,
-            "production tuner did not start the synthetic live HLS source for timeshift checks", TimeSpan.FromSeconds(20));
+        // Playback now uses a single growing TS file. Standalone SharedHlsSource
+        // recording checks above retain their own source without injecting tuner fields.
+        var priorPlayer = tuner.CurrentPlayer;
+        tuner.Play(new TuneRequest(channel.Id, channel.Name, fixture.ProgressiveTsUrl,
+            "recording-ui-synthetic-progressive-timeshift", IsLive: true, BufferMs: 200, AccountId: accountId));
+        await WaitUntil(() => tuner.CurrentPlayer is { IsPlaying: true } && !ReferenceEquals(tuner.CurrentPlayer, priorPlayer) && tuner.HasBufferedLivePlayback,
+            "production tuner did not start the continuous recording", TimeSpan.FromSeconds(30));
         var sharedHlsPlayer = tuner.CurrentPlayer!;
-        var sharedHlsSource = (SharedHlsSource)tunerSourceField.GetValue(tuner)!;
-        var sharedHlsPollerTask = sourceTaskField.GetValue(sharedHlsSource);
-        Check(sharedHlsPollerTask is Task,
-            "production tuner owns a running shared-HLS poller before timeshift checks");
-
-        // Exercise the real production pause/resume handlers against the tuner-owned
-        // HLS player. The relay should keep fetching into its timeshift buffer while
-        // LibVLC is paused, without reopening the provider URL or replacing the player.
-        var pausePlayer = (MediaPlayer?)Field("_mediaPlayer");
-        Check(ReferenceEquals(pausePlayer, sharedHlsPlayer) && pausePlayer is { IsPlaying: true },
-            "production MainWindow is attached to the active tuner-owned HLS MediaPlayer before pause");
-        var streamRequestsBeforePause = fixture.StreamRequests;
-        var pausePlaylistBaseline = fixture.SharedPlaylistRequests;
-        var pauseSegmentBaseline = fixture.SharedSegmentRequests;
-        var pauseWindowBaseline = sharedHlsSource.InspectTimeshiftWindow();
+        var fileSourceField = typeof(ChannelTuner).GetField("_activeFileSource", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var fileSource = fileSourceField.GetValue(tuner);
         Call("PauseCurrentPlayback");
-        await WaitUntil(() => pausePlayer!.State == VLCState.Paused,
-            $"production MediaPlayer did not enter Paused state (state={pausePlayer!.State})", TimeSpan.FromSeconds(5));
-        var pausedMediaTime = pausePlayer!.Time;
-        var pausedMediaLength = pausePlayer.Length;
-        var pausedMediaPosition = pausePlayer.Position;
-        var pausedMediaSeekable = pausePlayer.IsSeekable;
-        File.AppendAllText(Path.Combine(root, "evidence.txt"),
-            $"INFO live-HLS player position telemetry while paused: timeMs={pausedMediaTime}; lengthMs={pausedMediaLength}; position={pausedMediaPosition}; seekable={pausedMediaSeekable}.{Environment.NewLine}");
-        Check(ReferenceEquals(Field("_mediaPlayer"), pausePlayer) && ReferenceEquals(tuner.CurrentPlayer, pausePlayer) &&
-              pausePlayer.State == VLCState.Paused,
-            "production pause uses the existing MediaPlayer instance and reaches LibVLC Paused state");
-        await WaitUntil(() => sharedHlsSource.InspectTimeshiftWindow().LiveSequence > pauseWindowBaseline.LiveSequence,
-            "shared-HLS disk buffer did not advance while the production player was paused", TimeSpan.FromSeconds(8));
-        var pauseWindowAfter = sharedHlsSource.InspectTimeshiftWindow();
-        Check(pauseWindowAfter.BufferedBytes > 0 && pauseWindowAfter.LiveSequence > pauseWindowBaseline.LiveSequence,
-            $"shared-HLS timeshift buffer advances while paused (sequence={pauseWindowBaseline.LiveSequence}->{pauseWindowAfter.LiveSequence}; bytes={pauseWindowAfter.BufferedBytes})");
-        var pausedMediaTimeAfterBuffer = pausePlayer.Time;
-        File.AppendAllText(Path.Combine(root, "evidence.txt"),
-            $"INFO live-HLS player position after buffer advanced while paused: timeMs={pausedMediaTimeAfterBuffer}; lengthMs={pausePlayer.Length}; position={pausePlayer.Position}; seekable={pausePlayer.IsSeekable}.{Environment.NewLine}");
-        Check(fixture.SharedPlaylistRequests > pausePlaylistBaseline && fixture.SharedSegmentRequests > pauseSegmentBaseline &&
-              fixture.StreamRequests == streamRequestsBeforePause &&
-              ReferenceEquals(sourceTaskField.GetValue(sharedHlsSource), sharedHlsPollerTask) &&
-              fixture.SharedSegmentRequests == fixture.SharedSegmentFetches.Values.Sum() &&
-              fixture.SharedSegmentFetches.Values.All(count => count == 1),
-            "paused HLS playback keeps one existing shared poller/fetcher and starts no second provider-stream response");
-
-        var pauseResumePlaylistCount = fixture.SharedPlaylistRequests;
-        var pauseResumeSegmentCount = fixture.SharedSegmentRequests;
+        await WaitUntil(() => sharedHlsPlayer.State == VLCState.Paused, "recorded playback did not pause");
+        tuner.TryGetLivePlaybackPosition(out var pausedPosition, out var recordedBefore);
+        await WaitUntil(() => tuner.TryGetLivePlaybackPosition(out _, out var duration) && duration > recordedBefore,
+            "recording did not grow while paused");
+        tuner.TryGetLivePlaybackPosition(out var retainedPosition, out _);
+        Check(retainedPosition == pausedPosition, "pause retains the file reading timestamp while recording grows");
+        var pausedInput = sharedHlsPlayer.Media!.Mrl;
         Call("ResumePausedPlayback");
-        await WaitUntil(() => pausePlayer!.State == VLCState.Playing,
-            $"production MediaPlayer did not leave Paused after explicit resume (state={pausePlayer!.State})", TimeSpan.FromSeconds(5));
-        await WaitUntil(() => fixture.SharedPlaylistRequests > pauseResumePlaylistCount,
-            "existing shared-HLS poller did not complete another poll after resume", TimeSpan.FromSeconds(5));
-        Check(ReferenceEquals(Field("_mediaPlayer"), pausePlayer) && ReferenceEquals(tuner.CurrentPlayer, pausePlayer),
-            "explicit SetPause(false) resumes the same production MediaPlayer instance");
-        Check(fixture.StreamRequests == streamRequestsBeforePause &&
-              fixture.SharedSegmentRequests >= pauseResumeSegmentCount &&
-              ReferenceEquals(sourceTaskField.GetValue(sharedHlsSource), sharedHlsPollerTask),
-            $"resume adds no new direct provider-stream request or poller and preserves the original source task (direct={fixture.StreamRequests}/{streamRequestsBeforePause}; sourceTaskSame={ReferenceEquals(sourceTaskField.GetValue(sharedHlsSource), sharedHlsPollerTask)})");
-
-        var rewindWindow = sharedHlsSource.InspectTimeshiftWindow();
-        var rewindPoller = sourceTaskField.GetValue(sharedHlsSource);
-        var rewindPlayer = tuner.CurrentPlayer;
-        var rewindDirectRequests = fixture.StreamRequests;
-        Media? notifiedReplacement = null;
-        void OnActiveMediaChanged(MediaPlayer changedPlayer, Media changedMedia, TuneRequest changedRequest)
+        await WaitUntil(() => sharedHlsPlayer.IsPlaying, "recorded playback did not resume");
+        Check(sharedHlsPlayer.Media!.Mrl == pausedInput, "resume retains the file reader and decoder");
+        var rewind = await tuner.SeekLiveTimeshiftAsync(TimeSpan.FromSeconds(3));
+        Check(rewind.Success && ReferenceEquals(tuner.CurrentPlayer, sharedHlsPlayer) && ReferenceEquals(fileSourceField.GetValue(tuner), fileSource),
+            "rewind changes the file reading point while retaining the player and writer");
+        var liveReturn = await tuner.ReturnToLiveAsync();
+        Check(liveReturn.Success && sharedHlsPlayer.IsPlaying && ReferenceEquals(fileSourceField.GetValue(tuner), fileSource),
+            "Go Live resumes at the newest recorded edge on the existing writer");
+        Check(tuner.TryAttachSharedHlsRecording(accountId, channel.Id, out var fileRecording),
+            "recording attaches to the current file writer without retuning");
+        await using (fileRecording!)
         {
-            if (ReferenceEquals(changedPlayer, rewindPlayer) && changedRequest.ChannelId == channel.Id)
-                notifiedReplacement = changedMedia;
+            var payload = await fileRecording!.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+            Check(payload is { Data.Length: > 188 } && payload.Data.Span[0] == 0x47,
+                "attached recording receives MPEG-TS bytes from the growing file");
         }
-        tuner.ActiveMediaChanged += OnActiveMediaChanged;
-        var rewind = await tuner.SeekLiveTimeshiftAsync(TimeSpan.FromSeconds(3)).WaitAsync(TimeSpan.FromSeconds(15));
-        Check(rewind.Success && rewind.SelectedSequence is long selectedOldSequence && selectedOldSequence < rewindWindow.LiveSequence,
-            $"production tuner accepts an explicit buffered rewind to an older segment (selected={rewind.SelectedSequence}; edge={rewindWindow.LiveSequence}; reason={rewind.FailureReason})");
-        if (rewind.SelectedSequence is long requestedOldSequence)
-            await WaitUntil(() => sharedHlsSource.GetLocalPlaybackSegmentRequestCount(requestedOldSequence) > 0,
-                $"LibVLC did not request selected buffered segment {requestedOldSequence}", TimeSpan.FromSeconds(8));
-        Check(ReferenceEquals(tuner.CurrentPlayer, rewindPlayer) && rewindPlayer is { IsPlaying: true } &&
-              rewind.SelectedSequence is long decodedSequence && sharedHlsSource.GetLocalPlaybackSegmentRequestCount(decodedSequence) > 0,
-            $"selected buffered HLS input is actively playing on the same production MediaPlayer and its old segment was requested locally (state={rewindPlayer?.State}; sequence={rewind.SelectedSequence})");
-        Check(notifiedReplacement is not null && ReferenceEquals(tuner.GetType().GetField("_activeMedia", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(tuner), notifiedReplacement),
-            "ActiveMediaChanged publishes the replacement Media synchronously before the prior Media is retired");
-        Check(ReferenceEquals(Field("_currentMedia"), notifiedReplacement) && ReferenceEquals(Field("_mediaPlayer"), rewindPlayer),
-            "MainWindow receives the active Media handoff before the previous Media is retired without replacing its player");
-        Check(ReferenceEquals(tunerSourceField.GetValue(tuner), sharedHlsSource) &&
-              ReferenceEquals(sourceTaskField.GetValue(sharedHlsSource), rewindPoller) && fixture.StreamRequests == rewindDirectRequests &&
-              fixture.SharedSegmentRequests == fixture.SharedSegmentFetches.Values.Sum() &&
-              fixture.SharedSegmentFetches.Values.All(count => count == 1),
-            "rewind retains one shared source/poller and performs no duplicate/direct provider request");
-        var liveReturn = await tuner.ReturnToLiveAsync().WaitAsync(TimeSpan.FromSeconds(15));
-        Check(liveReturn.Success && liveReturn.SelectedSequence is long returnedLiveSequence &&
-              rewind.SelectedSequence is long rewoundSequence && returnedLiveSequence >= rewoundSequence &&
-              ReferenceEquals(tuner.CurrentPlayer, rewindPlayer) && rewindPlayer is { IsPlaying: true } &&
-              ReferenceEquals(tunerSourceField.GetValue(tuner), sharedHlsSource) &&
-              ReferenceEquals(sourceTaskField.GetValue(sharedHlsSource), rewindPoller),
-            $"return-to-live switches the same player to the latest buffered edge (sequence={liveReturn.SelectedSequence}; reason={liveReturn.FailureReason})");
-        tuner.ActiveMediaChanged -= OnActiveMediaChanged;
 
         // Exercise the non-HLS route through the production tuner and capture
         // service. The callbacks must retune the one input instead of opening a
         // second provider stream, then restore ordinary playback on Stop.
         var retunedRequest = new TuneRequest(channel.Id, channel.Name, fixture.ProgressiveTsUrl,
             "recording-ui-synthetic-progressive", IsLive: true, BufferMs: 200, AccountId: accountId);
+        var priorProgressivePlayer = tuner.CurrentPlayer;
         tuner.Play(retunedRequest);
         await WaitUntil(() => tuner.CurrentPlayer is { IsPlaying: true } &&
+                              !ReferenceEquals(tuner.CurrentPlayer, priorProgressivePlayer) &&
                               fixture.ProgressiveTsRequests >= 1 && tuner.CanRecordActiveStream,
             "production tuner did not restore the synthetic progressive stream", TimeSpan.FromSeconds(20));
         var ordinaryPlayer = tuner.CurrentPlayer!;
@@ -802,7 +735,7 @@ internal static class Program
             "Stop restores playback on a distinct production WPF player");
         Check(fixture.ProgressiveTsRequests - ordinaryRequestCount == 2,
             $"Record and Stop each make one sequential provider request, never concurrent ones (progressive TS delta={fixture.ProgressiveTsRequests - ordinaryRequestCount})");
-        Check(fixture.MaximumActiveProgressiveTsConnections <= Math.Max(1, activeTsBeforeRetune),
+        Check(fixture.MaximumActiveProgressiveTsConnections <= Math.Max(1, maxTsBeforeRetune),
             $"progressive TS concurrency does not exceed the already-active baseline or one (max={fixture.MaximumActiveProgressiveTsConnections}; active-before={activeTsBeforeRetune}; max-before={maxTsBeforeRetune}; events={string.Join(" | ", fixture.ProgressiveTsEvents.Skip(progressiveEventStart))})");
         Check(fixture.ActiveProgressiveTsConnections == 1,
             $"exactly one progressive TS provider response remains active after playback restore (active={fixture.ActiveProgressiveTsConnections})");

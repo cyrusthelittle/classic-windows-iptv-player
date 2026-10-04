@@ -163,7 +163,7 @@ Choose **Settings > Phone remote on/off** to enable the phone browser remote. Th
 The application stores its data beside the executable:
 
 ```text
-accounts.json                 Accounts and application settings
+accounts/accounts.json        Accounts and application settings
 cache/channels-<account>.json.gz
                               Per-account compressed playlist caches
 logs/                         Runtime and crash logs
@@ -248,3 +248,7 @@ For a downloaded release, extract the ZIP again and keep the complete folder tog
 ## Legal
 
 This project is a media player, not an IPTV service. It provides no paid subscriptions, private playlists, or copyrighted streams. You are responsible for complying with your provider's terms and all applicable laws.
+
+App data is stored in folders beside the executable: `accounts`, `cache`, `playlists`, `Recordings`, `logs`, `updates`, and `temp`. AppData is read only to import old saved data on the first portable launch; originals are retained for recovery. Keep the app in a writable folder. There is no AppData fallback.
+
+Enable or disable live timeshift under **More ? Enable timeshift**. It is enabled for new settings; existing saved preferences are preserved. Toggling it restarts the current live stream. Choose **Timeshift buffer duration** in the playback menu to retain 30, 60, 90, or 120 seconds of rewind history. Live inputs are remuxed without re-encoding into one sparse `temp/timeshift-*/session.ts` file per tune. During normal playback, expired TS data is released from disk and the seek bar covers only the configured buffer window. The writer keeps recording while an independent reader is paused and preserves the paused position; disk use grows for the pause duration so that point stays available. As playback advances or Go Live moves to the current edge, the buffer shrinks back to the configured duration. Resume retains the same decoder and read position; seeking opens another timestamp in that same file. Go Live resumes at the newest decodable recorded edge without opening a second provider connection. The pause counter shows seconds spent in the current pause. The timeline is also available after pausing with rewind controls disabled. A sparse file's logical length continues to reflect the whole session, while its allocated disk blocks are limited to retained history plus a small alignment margin. Formats VLC cannot remux or filesystems without sparse-file support fall back to direct viewing and display timeshift as unavailable. Movies and series show elapsed / total duration throughout playback.

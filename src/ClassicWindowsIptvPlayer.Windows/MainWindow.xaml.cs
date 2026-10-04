@@ -274,6 +274,7 @@ public partial class MainWindow : Window
     private bool _isCheckingForUpdates;
     private StagedUpdate? _stagedUpdate;
     private DateTime? _livePauseStartedUtc;
+    private TimeSpan _livePausedDuration;
     private DateTime _lastEpgUiUpdateUtc = DateTime.MinValue;
     private TimeSpan _liveBehind = TimeSpan.Zero;
     private long? _pendingResumeTimeMs;
@@ -488,6 +489,9 @@ public partial class MainWindow : Window
         {
             LibVLCSharp.Shared.Core.Initialize();
             return new LibVLC(
+                "--ignore-config",
+                "--input-timeshift-path=" + AppDataPaths.Temp,
+                "--input-record-path=" + GetDefaultRecordingFolder(),
                 "--no-video-title-show",
                 "--embedded-video",
                 "--avcodec-hw=none",
@@ -511,7 +515,11 @@ public partial class MainWindow : Window
             AppLogger.Warn("libvlc " + (e.Module ?? "core") + ": " + e.Message);
         };
 
-        _tuner = new ChannelTuner(_libVlc) { MaxAttempts = GetReconnectAttempts() };
+        _tuner = new ChannelTuner(_libVlc) { MaxAttempts = GetReconnectAttempts(), TimeshiftEnabled = _state.TimeshiftEnabled };
+        TimeshiftMenu.IsChecked = _state.TimeshiftEnabled;
+        if (_state.TimeshiftSeconds is not (30 or 60 or 90 or 120)) _state.TimeshiftSeconds = 30;
+        _tuner.SetTimeshiftRetention(_state.TimeshiftSeconds);
+        UpdateTimeshiftSecondsUi();
         _tuner.PlayerAttached += OnTunerPlayerAttached;
         _tuner.ActiveMediaChanged += OnTunerActiveMediaChanged;
         _tuner.PlayerDetaching += OnTunerPlayerDetaching;
@@ -528,7 +536,8 @@ public partial class MainWindow : Window
         SaveRecordingIndex(_state.SelectedAccountId);
         _recordingProfile = null;
         _recordingIndex = _store.LoadRecordingIndex(_state.SelectedAccountId) ?? new RecordingIndex();
-        _recordingFolder = NormalizeRecordingFolder(_state.RecordingFolder);
+        _recordingFolder = GetDefaultRecordingFolder();
+        _state.RecordingFolder = _recordingFolder;
         _recordingService = new RecordingService(_recordingBudget, _recordingIndex);
         _recordingService.StateChanged += snapshot => Dispatcher.BeginInvoke(new Action(() =>
         {
@@ -629,33 +638,8 @@ public partial class MainWindow : Window
 
     private void ChooseRecordingFolder_Click(object sender, RoutedEventArgs e)
     {
-        using var dialog = new System.Windows.Forms.FolderBrowserDialog
-        {
-            Description = "Choose where recordings are saved by default.",
-            ShowNewFolderButton = true,
-            SelectedPath = System.IO.Directory.Exists(GetRecordingFolder()) ? GetRecordingFolder() : Environment.GetFolderPath(Environment.SpecialFolder.MyVideos)
-        };
-        if (dialog.ShowDialog() != System.Windows.Forms.DialogResult.OK || string.IsNullOrWhiteSpace(dialog.SelectedPath)) return;
-        try
-        {
-            System.IO.Directory.CreateDirectory(dialog.SelectedPath);
-            var destination = RecordingPolicy.ValidateDestination(dialog.SelectedPath);
-            if (!destination.IsValid)
-            {
-                MessageBox.Show(this, destination.Message, "Recording folder unavailable", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-            _recordingFolder = destination.Folder;
-            _state.RecordingFolder = destination.Folder;
-            _store.Save(_state);
-            StatusText.Text = "Default recording folder: " + destination.Folder;
-        }
-        catch (Exception exception)
-        {
-            AppLogger.Error("Could not save the default recording folder.", exception);
-            MessageBox.Show(this, "The recording folder could not be saved. " + AppLogger.SanitizeText(exception.Message),
-                "Recording folder", MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
+        Directory.CreateDirectory(GetDefaultRecordingFolder());
+        Process.Start(new ProcessStartInfo(GetDefaultRecordingFolder()) { UseShellExecute = true });
     }
 
     private async void Record_Click(object sender, RoutedEventArgs e)
@@ -1186,8 +1170,6 @@ public partial class MainWindow : Window
             if (ReferenceEquals(_libraryLoadCts, cts)) _libraryLoadCts = null;
             if (generation == _libraryLoadGeneration)
             {
-                CancelLibraryRefreshButton.IsEnabled = false;
-                RetryLibraryRefreshButton.IsEnabled = true;
                 if (!keepLoadingVisible) HideAccountLoading();
             }
             cts.Dispose();
@@ -1273,8 +1255,6 @@ public partial class MainWindow : Window
     {
         var updated = _state.EnsureSelectedAccount().LastPlaylistUpdatedUtc;
         LibraryRefreshStatusText.Text = message + (updated.HasValue ? $" Last successful update: {updated.Value.ToLocalTime():g}" : " No successful update yet.");
-        CancelLibraryRefreshButton.IsEnabled = busy;
-        RetryLibraryRefreshButton.IsEnabled = !busy;
     }
 
     private void ToggleBackgroundPlaylistRefresh_Click(object sender, RoutedEventArgs e)
@@ -2431,7 +2411,7 @@ public partial class MainWindow : Window
             var candidate = candidates[candidateIndex];
             ClearCatchup();
             var request = new TuneRequest(channel.Id, channel.Name, candidate.Url, candidate.Label,
-                channel.MediaKind == MediaKind.Live, GetPlaybackBufferMs(), _state.SelectedAccountId);
+                channel.MediaKind == MediaKind.Live, GetPlaybackBufferMs(), _state.SelectedAccountId, _state.TimeshiftSeconds);
             _playbackState.Start(channel, candidates, candidateIndex, request);
             _playingSeriesEpisodes = channel.MediaKind == MediaKind.Series && _activeSeriesEpisodes is not null &&
                 _activeSeriesEpisodes.Any(episode => ItemIdentity.For(episode) == ItemIdentity.For(channel))
@@ -2617,8 +2597,13 @@ public partial class MainWindow : Window
     private void TogglePlayPause()
     {
         if (_mediaPlayer is null) return;
-        if (_mediaPlayer.IsPlaying) PauseCurrentPlayback();
-        else if (_pausedPlayback is not null) ResumePausedPlayback();
+        if (_pausedPlayback is not null) ResumePausedPlayback();
+        else if (_mediaPlayer.State is VLCState.Playing or VLCState.Buffering) PauseCurrentPlayback();
+        else if (_mediaPlayer.State == VLCState.Paused)
+        {
+            PauseCurrentPlayback();
+            ResumePausedPlayback();
+        }
         else if (_catchupPlayback is { } archive) _ = StartCatchupAsync(archive.Source, archive.Programme);
         else if (_currentChannel is not null) PlayChannel(_currentChannel);
         else if (ChannelList.SelectedItem is ChannelListEntry { Channel: { } channel }) PlayChannel(channel);
@@ -2628,6 +2613,12 @@ public partial class MainWindow : Window
     private void PauseCurrentPlayback()
     {
         if (_mediaPlayer is null) return;
+        if (_pausedPlayback is not null && _pausedPlayback.Channel.Id.Equals(_currentChannel?.Id, StringComparison.OrdinalIgnoreCase))
+        {
+            UpdatePlaybackPosition();
+            UpdateLiveDelayUi();
+            return;
+        }
         SavePlaybackProgress(force: true);
 
         PausePlayerImmediately(_mediaPlayer);
@@ -2646,7 +2637,7 @@ public partial class MainWindow : Window
         StartLivePauseTracking();
 
         PlayPauseButton.Content = IconFactory.Create(IconFactory.Play);
-        TimeText.Visibility = _pausedPlayback is null ? Visibility.Collapsed : Visibility.Visible;
+        TimeText.Visibility = Visibility.Visible;
         StatusText.Text = _pausedPlayback is null
             ? "Paused."
             : "Paused at " + FormatTime(_pausedPlayback.TimeMs) + ".";
@@ -2659,6 +2650,26 @@ public partial class MainWindow : Window
 
         var player = _mediaPlayer;
         var snapshot = _pausedPlayback;
+        if (snapshot.Channel.MediaKind == MediaKind.Live && _tuner?.HasBufferedLivePlayback == true)
+        {
+            try
+            {
+                var result = await _tuner!.ResumeBufferedPauseAsync();
+                if (!ReferenceEquals(_mediaPlayer, player) || !ReferenceEquals(_pausedPlayback, snapshot)) return;
+                if (!result.Success)
+                {
+                    StatusText.Text = result.FailureReason ?? "The paused point could not be resumed.";
+                    return;
+                }
+                _pausedPlayback = null;
+                FinishLivePauseTracking();
+                PlayPauseButton.Content = IconFactory.Create(IconFactory.Pause);
+                StatusText.Text = "Resumed from the paused position.";
+                UpdateStreamInfo();
+            }
+            catch (OperationCanceledException) { }
+            return;
+        }
         _tuner?.NotifyUserResumed();
 
         var resumed = false;
@@ -2689,7 +2700,7 @@ public partial class MainWindow : Window
             FinishLivePauseTracking();
             PlayPauseButton.Content = IconFactory.Create(IconFactory.Pause);
             StatusText.Text = "Resumed: " + snapshot.Channel.Name;
-            TimeText.Visibility = Visibility.Collapsed;
+            TimeText.Visibility = Visibility.Visible;
             UpdatePlaybackPosition();
             return;
         }
@@ -2730,6 +2741,7 @@ public partial class MainWindow : Window
     {
         if (_catchupPlayback is not null) return;
         if (_currentChannel?.MediaKind != MediaKind.Live) return;
+        _livePausedDuration = TimeSpan.Zero;
         _livePauseStartedUtc = DateTime.UtcNow;
         UpdateLiveDelayUi();
     }
@@ -2738,7 +2750,9 @@ public partial class MainWindow : Window
     {
         if (_livePauseStartedUtc is DateTime pausedAt)
         {
-            _liveBehind += DateTime.UtcNow - pausedAt;
+            var pausedFor = DateTime.UtcNow - pausedAt;
+            _liveBehind += pausedFor;
+            _livePausedDuration += pausedFor;
             _livePauseStartedUtc = null;
         }
 
@@ -2748,6 +2762,7 @@ public partial class MainWindow : Window
     private void ClearLiveDelay()
     {
         _livePauseStartedUtc = null;
+        _livePausedDuration = TimeSpan.Zero;
         _liveBehind = TimeSpan.Zero;
         UpdateLiveDelayUi();
     }
@@ -2755,6 +2770,8 @@ public partial class MainWindow : Window
     private TimeSpan GetCurrentLiveBehind()
     {
         if (_currentChannel?.MediaKind != MediaKind.Live) return TimeSpan.Zero;
+        if (_tuner?.TryGetLivePlaybackPosition(out var position, out var duration) == true)
+            return duration - position;
         var behind = _liveBehind;
         if (_livePauseStartedUtc is DateTime pausedAt)
         {
@@ -2764,20 +2781,37 @@ public partial class MainWindow : Window
         return behind < TimeSpan.Zero ? TimeSpan.Zero : behind;
     }
 
+    private TimeSpan GetLivePauseElapsed()
+    {
+        var elapsed = _livePausedDuration;
+        if (_livePauseStartedUtc is DateTime pausedAt) elapsed += DateTime.UtcNow - pausedAt;
+        return elapsed < TimeSpan.Zero ? TimeSpan.Zero : elapsed;
+    }
+
+    private bool IsLivePaused => _catchupPlayback is null && _currentChannel?.MediaKind == MediaKind.Live && _pausedPlayback is not null;
+
+    private string FormatLivePosition(TimeSpan behind, TimeSpan available)
+    {
+        var position = FormatLiveTimeshiftPosition(behind, available);
+        return IsLivePaused ? "Paused " + FormatTime((long)GetLivePauseElapsed().TotalMilliseconds) + " · " + position : position;
+    }
+
     private void UpdateLiveDelayUi()
     {
         var behind = GetCurrentLiveBehind();
         var show = _catchupPlayback is not null || behind >= TimeSpan.FromSeconds(1);
+        var pausedLive = IsLivePaused;
         var text = _catchupPlayback is not null ? "Watching archive" : show ? "Behind live " + FormatLiveDelay(behind) : string.Empty;
         LiveTimeshiftWindow? timeshiftWindow = null;
         var hasTimeshift = _currentChannel?.MediaKind == MediaKind.Live &&
             _tuner?.TryInspectLiveTimeshift(out timeshiftWindow, out _) == true;
-        var canRewind = hasTimeshift && timeshiftWindow!.Duration >= TimeSpan.FromSeconds(30) &&
+        var canRewind = hasTimeshift && timeshiftWindow!.Duration >= GetCurrentLiveBehind() + TimeSpan.FromSeconds(_state.TimeshiftSeconds) &&
             _mediaPlayer?.State == VLCState.Playing;
 
         LiveDelayText.Text = text;
         LiveDelayText.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
-        GoLiveButton.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        GoLiveButton.Visibility = pausedLive ? Visibility.Visible : Visibility.Collapsed;
+        GoLiveButton.IsEnabled = pausedLive;
         GoLiveMenuItem.IsEnabled = show;
         VideoGoLiveMenuItem.IsEnabled = show;
         RewindLiveButton.Visibility = hasTimeshift ? Visibility.Visible : Visibility.Collapsed;
@@ -3076,24 +3110,54 @@ public partial class MainWindow : Window
         }
     }
 
+    private void TimeshiftToggle_Click(object sender, RoutedEventArgs e)
+    {
+        _state.TimeshiftEnabled = TimeshiftMenu.IsChecked;
+        _store.Save(_state);
+        if (_tuner is not null) _tuner.TimeshiftEnabled = _state.TimeshiftEnabled;
+        if (_currentChannel?.MediaKind == MediaKind.Live) RestartStream_Click(sender, e);
+        UpdatePlaybackPosition();
+    }
+
+    private void TimeshiftSeconds_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not WpfMenuItem item || !int.TryParse(item.Tag?.ToString(), out var seconds) || seconds is not (30 or 60 or 90 or 120)) return;
+        _state.TimeshiftSeconds = seconds;
+        _store.Save(_state);
+        _tuner?.SetTimeshiftRetention(seconds);
+        UpdateTimeshiftSecondsUi();
+        UpdateLiveDelayUi();
+    }
+
+    private void UpdateTimeshiftSecondsUi()
+    {
+        foreach (var item in TimeshiftSecondsMenu.Items.OfType<WpfMenuItem>())
+            item.IsChecked = item.Tag?.ToString() == _state.TimeshiftSeconds.ToString();
+        RewindLiveMenuItem.Header = "Rewind " + _state.TimeshiftSeconds + " seconds";
+        RewindLiveButton.Content = "−" + _state.TimeshiftSeconds + "s";
+        RewindLiveButton.ToolTip = "Rewind the current stream by " + _state.TimeshiftSeconds + " seconds";
+    }
+
     private void UpdatePlaybackPosition()
     {
         if (_mediaPlayer is null || _isSeeking) return;
+        var isLive = _currentChannel?.MediaKind == MediaKind.Live && _catchupPlayback is null;
+        SeekSlider.Visibility = isLive && !_state.TimeshiftEnabled && _livePauseStartedUtc is null && _livePausedDuration == TimeSpan.Zero ? Visibility.Collapsed : Visibility.Visible;
         ApplyPreferredTracks(_mediaPlayer);
         SavePlaybackProgress(force: false);
         if (TryGetLiveTimeshiftWindow(out var liveWindow) && liveWindow!.Duration > TimeSpan.Zero)
         {
-            SeekSlider.IsEnabled = true;
+            SeekSlider.IsEnabled = _mediaPlayer.State is VLCState.Playing or VLCState.Paused;
             _updatingSeekSlider = true;
             try { SeekSlider.Value = LiveTimeshiftSliderValue(GetCurrentLiveBehind(), liveWindow.Duration); }
             finally { _updatingSeekSlider = false; }
-            TimeText.Text = FormatLiveTimeshiftPosition(GetCurrentLiveBehind(), liveWindow.Duration);
+            TimeText.Text = FormatLivePosition(GetCurrentLiveBehind(), liveWindow.Duration);
             TimeText.Visibility = Visibility.Visible;
             return;
         }
         var length = _mediaPlayer.Length;
         var time = _mediaPlayer.Time;
-        if (length > 0)
+        if (length > 0 && !isLive)
         {
             SeekSlider.IsEnabled = true;
             _updatingSeekSlider = true;
@@ -3107,9 +3171,13 @@ public partial class MainWindow : Window
             _updatingSeekSlider = true;
             try { SeekSlider.Value = 0; }
             finally { _updatingSeekSlider = false; }
-            TimeText.Text = _mediaPlayer.IsPlaying ? "Live" : "00:00 / 00:00";
+            TimeText.Text = IsLivePaused
+                ? "Paused " + FormatTime((long)GetLivePauseElapsed().TotalMilliseconds) + " · timeshift unavailable"
+                : isLive && _state.TimeshiftEnabled
+                ? "Timeshift unavailable for this stream"
+                : _mediaPlayer.IsPlaying ? "Live" : "00:00 / 00:00";
         }
-        TimeText.Visibility = _pausedPlayback is null ? Visibility.Collapsed : Visibility.Visible;
+        TimeText.Visibility = Visibility.Visible;
     }
 
     private void SavePlaybackProgress(bool force)
@@ -3131,9 +3199,13 @@ public partial class MainWindow : Window
         return ts.TotalHours >= 1 ? ts.ToString(@"h\:mm\:ss") : ts.ToString(@"mm\:ss");
     }
 
+    private TimeSpan? _seekWindowDuration;
+    private bool _committingLiveSeek;
+
     private void SeekSlider_PreviewMouseDown(object sender, MouseButtonEventArgs e)
     {
         _isSeekingLiveTimeshift = TryGetLiveTimeshiftWindow(out var window) && window!.Duration > TimeSpan.Zero;
+        _seekWindowDuration = _isSeekingLiveTimeshift ? window!.Duration : null;
         _isSeeking = true;
     }
 
@@ -3155,7 +3227,8 @@ public partial class MainWindow : Window
         if (_updatingSeekSlider || _mediaPlayer is null) return;
         if (TryGetLiveTimeshiftWindow(out var liveWindow) && liveWindow!.Duration > TimeSpan.Zero)
         {
-            TimeText.Text = FormatLiveTimeshiftPosition(LiveTimeshiftBehindForSlider(SeekSlider.Value, liveWindow.Duration), liveWindow.Duration);
+            var previewDuration = _seekWindowDuration ?? liveWindow.Duration;
+            TimeText.Text = FormatLivePosition(LiveTimeshiftBehindForSlider(SeekSlider.Value, previewDuration), previewDuration);
             TimeText.Visibility = Visibility.Visible;
             if (!_isSeeking && SeekSlider.IsKeyboardFocusWithin)
                 _ = CommitLiveTimeshiftSliderAsync();
@@ -3171,7 +3244,7 @@ public partial class MainWindow : Window
     private bool TryGetLiveTimeshiftWindow(out LiveTimeshiftWindow? window)
     {
         window = null;
-        return _currentChannel?.MediaKind == MediaKind.Live && _tuner?.TryInspectLiveTimeshift(out window, out _) == true;
+        return _catchupPlayback is null && _currentChannel?.MediaKind == MediaKind.Live && _tuner?.TryInspectLiveTimeshift(out window, out _) == true;
     }
 
     private static double LiveTimeshiftSliderValue(TimeSpan behindLive, TimeSpan available) =>
@@ -3181,30 +3254,48 @@ public partial class MainWindow : Window
         TimeSpan.FromMilliseconds(available.TotalMilliseconds * (1.0 - Math.Clamp(sliderValue, 0, 1000) / 1000.0));
 
     private static string FormatLiveTimeshiftPosition(TimeSpan behindLive, TimeSpan available) =>
-        behindLive < TimeSpan.FromSeconds(1) ? "Live / " + FormatLiveDelay(available) : "Behind live " + FormatLiveDelay(behindLive) + " / " + FormatLiveDelay(available);
+        FormatTime((long)Math.Max(0, (available - behindLive).TotalMilliseconds)) + " / " + FormatTime((long)available.TotalMilliseconds) + (behindLive < TimeSpan.FromSeconds(3) ? "  LIVE" : "");
 
     private async Task CommitLiveTimeshiftSliderAsync()
     {
         if (_tuner is null || !TryGetLiveTimeshiftWindow(out var window) || window!.Duration <= TimeSpan.Zero) return;
-        var targetBehindLive = LiveTimeshiftBehindForSlider(SeekSlider.Value, window.Duration);
-        TimeshiftPlaybackSwitchResult result;
-        if (targetBehindLive < TimeSpan.FromSeconds(1)) result = await _tuner.ReturnToLiveAsync();
-        else result = await _tuner.SeekLiveTimeshiftAsync(targetBehindLive);
-        if (result.Success)
+        if (_committingLiveSeek) return;
+        _committingLiveSeek = true;
+        try
         {
-            ClearPauseResumeState();
-            _livePauseStartedUtc = null;
-            _liveBehind = targetBehindLive < TimeSpan.FromSeconds(1) ? TimeSpan.Zero : targetBehindLive;
-            StatusText.Text = targetBehindLive < TimeSpan.FromSeconds(1)
-                ? "Live: " + (_currentChannel?.Name ?? "")
-                : "Timeshift position: " + FormatLiveDelay(targetBehindLive) + " behind live";
+            var selectedDuration = _seekWindowDuration ?? window.Duration;
+            _seekWindowDuration = null;
+            var selectedPosition = selectedDuration - LiveTimeshiftBehindForSlider(SeekSlider.Value, selectedDuration);
+            var targetBehindLive = SeekSlider.Value >= 999 ? TimeSpan.Zero : window.Duration - selectedPosition;
+            TimeshiftPlaybackSwitchResult result;
+            if (targetBehindLive < TimeSpan.FromSeconds(1)) result = await _tuner.ReturnToLiveAsync();
+            else result = await _tuner.SeekLiveTimeshiftAsync(targetBehindLive);
+            if (result.Success)
+            {
+                var wasPaused = IsLivePaused;
+                var pausedFor = wasPaused ? GetLivePauseElapsed() : TimeSpan.Zero;
+                ClearPauseResumeState();
+                _livePauseStartedUtc = null;
+                _liveBehind = targetBehindLive < TimeSpan.FromSeconds(1) ? TimeSpan.Zero : targetBehindLive;
+                if (wasPaused && targetBehindLive >= TimeSpan.FromSeconds(1))
+                {
+                    PauseCurrentPlayback();
+                    _livePausedDuration = pausedFor;
+                }
+                else PlayPauseButton.Content = IconFactory.Create(IconFactory.Pause);
+                StatusText.Text = targetBehindLive < TimeSpan.FromSeconds(1)
+                    ? "Live: " + (_currentChannel?.Name ?? "")
+                    : "Timeshift position: " + FormatLiveDelay(targetBehindLive) + " behind live";
+            }
+            else
+            {
+                StatusText.Text = result.FailureReason ?? "The requested timeshift position is unavailable.";
+            }
+            UpdatePlaybackPosition();
+            UpdateLiveDelayUi();
         }
-        else
-        {
-            StatusText.Text = result.FailureReason ?? "The requested timeshift position is unavailable.";
-        }
-        UpdatePlaybackPosition();
-        UpdateLiveDelayUi();
+        catch (OperationCanceledException) { }
+        finally { _committingLiveSeek = false; }
     }
 
     private void InitializeVolumeControls()
@@ -3331,7 +3422,7 @@ public partial class MainWindow : Window
         var compact = e.NewSize.Width < 690;
         PreviousButton.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
         NextButton.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
-        TimeText.Visibility = !compact && _pausedPlayback is not null ? Visibility.Visible : Visibility.Collapsed;
+        TimeText.Visibility = Visibility.Visible;
         VolumeSlider.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
         NowPlayingText.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
     }
@@ -4585,12 +4676,12 @@ public partial class MainWindow : Window
     {
         if (_tuner is null || _currentChannel?.MediaKind != MediaKind.Live)
         {
-            StatusText.Text = "Rewind is available only for a supported live HLS channel.";
+            StatusText.Text = "Rewind is available only for a supported live stream.";
             return;
         }
 
         RewindLiveButton.IsEnabled = false;
-        var targetBehindLive = GetCurrentLiveBehind() + TimeSpan.FromSeconds(30);
+        var targetBehindLive = GetCurrentLiveBehind() + TimeSpan.FromSeconds(_state.TimeshiftSeconds);
         var result = await _tuner.SeekLiveTimeshiftAsync(targetBehindLive);
         if (result.Success)
         {
@@ -4620,8 +4711,14 @@ public partial class MainWindow : Window
             var result = await _tuner.ReturnToLiveAsync();
             if (result.Success)
             {
+                var wasPaused = _pausedPlayback is not null;
                 ClearPauseResumeState();
                 ClearLiveDelay();
+                if (wasPaused)
+                {
+                    _mediaPlayer?.SetPause(false);
+                    PlayPauseButton.Content = IconFactory.Create(IconFactory.Pause);
+                }
                 StatusText.Text = "Live: " + _currentChannel.Name;
             }
             else

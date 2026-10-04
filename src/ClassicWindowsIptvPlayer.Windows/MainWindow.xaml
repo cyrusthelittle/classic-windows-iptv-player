@@ -48,7 +48,14 @@
                 <MenuItem x:Name="GoLiveMenuItem" Header="Go live" Click="GoLive_Click" IsEnabled="False" />
                 <MenuItem x:Name="RewindLiveMenuItem" Header="Rewind 30 seconds" Click="RewindLive_Click" IsEnabled="False" />
                 <Separator />
-                <MenuItem Header="Restart stream" Click="RestartStream_Click" />
+                <MenuItem x:Name="TimeshiftMenu" Header="Enable timeshift" IsCheckable="True" Click="TimeshiftToggle_Click" />
+                <MenuItem x:Name="TimeshiftSecondsMenu" Header="Timeshift buffer duration">
+                    <MenuItem Header="30 seconds" Tag="30" IsCheckable="True" Click="TimeshiftSeconds_Click" />
+                    <MenuItem Header="60 seconds" Tag="60" IsCheckable="True" Click="TimeshiftSeconds_Click" />
+                    <MenuItem Header="90 seconds" Tag="90" IsCheckable="True" Click="TimeshiftSeconds_Click" />
+                    <MenuItem Header="120 seconds" Tag="120" IsCheckable="True" Click="TimeshiftSeconds_Click" />
+                </MenuItem>
+                                            <MenuItem Header="Restart stream" Click="RestartStream_Click" />
                 <MenuItem Header="Copy selected stream URL" Click="CopyStreamUrl_Click" />
                 <Separator />
                 <MenuItem Header="Favorite / unfavorite selected" Click="ToggleFavorite_Click" />
@@ -56,7 +63,7 @@
             <MenuItem x:Name="SubtitleMenu" Header="Subtitles" />
             <MenuItem Header="Settings" SubmenuOpened="SettingsMenu_Opened">
                 <MenuItem x:Name="BackgroundPlaylistRefreshMenuItem" Header="Update playlist in the background every time I open this account" IsCheckable="True" Click="ToggleBackgroundPlaylistRefresh_Click" />
-                <MenuItem Header="Recording folder..." Click="ChooseRecordingFolder_Click" />
+                <MenuItem Header="Open recordings folder" Click="ChooseRecordingFolder_Click" />
                 <MenuItem Header="Feedback endpoint..." Click="FeedbackEndpoint_Click" />
                 <Separator />
                 <MenuItem Header="Buffer 1 sec" Click="Buffer1_Click" />
@@ -391,13 +398,14 @@
                             <RowDefinition Height="Auto" />
                         </Grid.RowDefinitions>
 
-                        <Slider x:Name="SeekSlider" Minimum="0" Maximum="1000" ValueChanged="SeekSlider_ValueChanged" PreviewMouseDown="SeekSlider_PreviewMouseDown" PreviewMouseUp="SeekSlider_PreviewMouseUp" Margin="0,0,0,8" />
+                        <Slider Style="{StaticResource PlaybackSeekStyle}" IsMoveToPointEnabled="True" x:Name="SeekSlider" Minimum="0" Maximum="1000" ValueChanged="SeekSlider_ValueChanged" PreviewMouseDown="SeekSlider_PreviewMouseDown" PreviewMouseUp="SeekSlider_PreviewMouseUp" Margin="0,0,0,8" />
 
                         <DockPanel Grid.Row="1" LastChildFill="True">
                             <StackPanel Orientation="Horizontal" DockPanel.Dock="Left">
                                 <Button x:Name="ToggleChannelsButton" Style="{StaticResource GhostButton}" Width="42" ToolTip="Show or hide channels" Click="ToggleChannels_Click" />
                                 <Button x:Name="PreviousButton" Style="{StaticResource GhostButton}" Width="42" Margin="8,0,0,0" ToolTip="Previous channel" Click="Previous_Click" />
                                 <Button x:Name="PlayPauseButton" Style="{StaticResource PrimaryButton}" Width="54" Margin="8,0,0,0" ToolTip="Play or pause" Click="PlayPause_Click" />
+                                <Button x:Name="GoLiveButton" Style="{StaticResource PrimaryButton}" Content="Go Live" Margin="8,0,0,0" ToolTip="Return to the live edge and resume" Click="GoLive_Click" Visibility="Collapsed" />
                                 <Button x:Name="StopButton" Style="{StaticResource GhostButton}" Width="42" Margin="8,0,0,0" ToolTip="Stop" Click="Stop_Click" />
                                 <Button x:Name="RecordButton" Style="{StaticResource GhostButton}" Content="Record" Margin="8,0,0,0" ToolTip="Record the playing live channel" Click="Record_Click" IsEnabled="False" />
                                 <Button x:Name="StopRecordingButton" Style="{StaticResource GhostButton}" Content="Stop recording" Margin="5,0,0,0" Click="StopRecording_Click" IsEnabled="False" Visibility="Collapsed" />
@@ -479,8 +487,7 @@
                                 <ComboBoxItem Content="10 sec" Tag="10000" />
                             </ComboBox>
                             <TextBlock x:Name="LiveDelayText" Grid.Column="2" Text="" VerticalAlignment="Center" HorizontalAlignment="Right" Foreground="{DynamicResource Text2Brush}" FontWeight="SemiBold" Margin="12,0,0,0" Visibility="Collapsed" />
-                            <Button x:Name="RewindLiveButton" Grid.Column="3" Style="{StaticResource GhostButton}" Content="−30s" Margin="8,0,0,0" ToolTip="Rewind the current HLS stream by 30 seconds" Click="RewindLive_Click" IsEnabled="False" Visibility="Collapsed" />
-                            <Button x:Name="GoLiveButton" Grid.Column="4" Style="{StaticResource PrimaryButton}" Content="Go Live" Margin="8,0,0,0" ToolTip="Reconnect at the live edge" Click="GoLive_Click" Visibility="Collapsed" />
+                            <Button x:Name="RewindLiveButton" Grid.Column="3" Style="{StaticResource GhostButton}" Content="−30s" Margin="8,0,0,0" ToolTip="Rewind the current live stream by 30 seconds" Click="RewindLive_Click" IsEnabled="False" Visibility="Collapsed" />
                             <Button x:Name="RestartButton" Grid.Column="5" Style="{StaticResource GhostButton}" Margin="8,0,0,0" ToolTip="Restart stream" Click="RestartStream_Click" />
                             <Button x:Name="CopyUrlButton" Grid.Column="6" Style="{StaticResource GhostButton}" Margin="8,0,0,0" ToolTip="Copy stream URL" Click="CopyStreamUrl_Click" />
                         </Grid>
@@ -498,8 +505,6 @@
 
         <StatusBar x:Name="MainStatusBar" Grid.Row="2" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource Text0Brush}">
             <TextBlock x:Name="LibraryRefreshStatusText" MaxWidth="640" TextTrimming="CharacterEllipsis" AutomationProperties.LiveSetting="Polite" ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}" />
-            <Button x:Name="CancelLibraryRefreshButton" Content="Cancel" Click="CancelLibraryLoad_Click" IsEnabled="False" Padding="6,0" AutomationProperties.Name="Cancel playlist refresh" />
-            <Button x:Name="RetryLibraryRefreshButton" Content="Retry" Click="RetryLibraryLoad_Click" Padding="6,0" AutomationProperties.Name="Retry playlist refresh" />
             <Separator />
             <TextBlock x:Name="StatusText" Text="Ready" />
         </StatusBar>
