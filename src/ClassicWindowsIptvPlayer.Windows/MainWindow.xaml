@@ -59,12 +59,14 @@
                 <MenuItem Header="Copy selected stream URL" Click="CopyStreamUrl_Click" />
                 <Separator />
                 <MenuItem Header="Favorite / unfavorite selected" Click="ToggleFavorite_Click" />
+                <MenuItem Header="Audio track" SubmenuOpened="AudioTrackMenu_Opened">
+                    <MenuItem Header="No audio tracks available" IsEnabled="False" />
+                </MenuItem>
             </MenuItem>
             <MenuItem x:Name="SubtitleMenu" Header="Subtitles" />
             <MenuItem Header="Settings" SubmenuOpened="SettingsMenu_Opened">
                 <MenuItem x:Name="BackgroundPlaylistRefreshMenuItem" Header="Update playlist in the background every time I open this account" IsCheckable="True" Click="ToggleBackgroundPlaylistRefresh_Click" />
                 <MenuItem Header="Open recordings folder" Click="ChooseRecordingFolder_Click" />
-                <MenuItem Header="Feedback endpoint..." Click="FeedbackEndpoint_Click" />
                 <Separator />
                 <MenuItem Header="Buffer 1 sec" Click="Buffer1_Click" />
                 <MenuItem Header="Buffer 3 sec" Click="Buffer3_Click" />
@@ -326,6 +328,9 @@
                             <MenuItem Header="Favorite / unfavorite" Click="ToggleFavorite_Click" />
                             <Separator />
                             <MenuItem x:Name="VideoSubtitleMenu" Header="Subtitles" />
+                            <MenuItem Header="Audio track" SubmenuOpened="AudioTrackMenu_Opened">
+                                <MenuItem Header="No audio tracks available" IsEnabled="False" />
+                            </MenuItem>
                             <Separator />
                             <MenuItem Header="Show stream information" Click="ShowStreamInfo_Click" />
                         </ContextMenu>
@@ -403,26 +408,27 @@
                         <DockPanel Grid.Row="1" LastChildFill="True">
                             <StackPanel Orientation="Horizontal" DockPanel.Dock="Left">
                                 <Button x:Name="ToggleChannelsButton" Style="{StaticResource GhostButton}" Width="42" ToolTip="Show or hide channels" Click="ToggleChannels_Click" />
-                                <Button x:Name="PreviousButton" Style="{StaticResource GhostButton}" Width="42" Margin="8,0,0,0" ToolTip="Previous channel" Click="Previous_Click" />
                                 <Button x:Name="PlayPauseButton" Style="{StaticResource PrimaryButton}" Width="54" Margin="8,0,0,0" ToolTip="Play or pause" Click="PlayPause_Click" />
-                                <Button x:Name="GoLiveButton" Style="{StaticResource PrimaryButton}" Content="Go Live" Margin="8,0,0,0" ToolTip="Return to the live edge and resume" Click="GoLive_Click" Visibility="Collapsed" />
                                 <Button x:Name="StopButton" Style="{StaticResource GhostButton}" Width="42" Margin="8,0,0,0" ToolTip="Stop" Click="Stop_Click" />
-                                <Button x:Name="RecordButton" Style="{StaticResource GhostButton}" Content="Record" Margin="8,0,0,0" ToolTip="Record the playing live channel" Click="Record_Click" IsEnabled="False" />
-                                <Button x:Name="StopRecordingButton" Style="{StaticResource GhostButton}" Content="Stop recording" Margin="5,0,0,0" Click="StopRecording_Click" IsEnabled="False" Visibility="Collapsed" />
-                                <Button x:Name="FavoriteButton" Style="{StaticResource GhostButton}" Width="42" Margin="5,0,0,0" ToolTip="Favorite" AutomationProperties.Name="Favorite or unfavorite selected channel" Click="ToggleFavorite_Click" />
+                                <Button x:Name="PreviousButton" Style="{StaticResource GhostButton}" Width="42" Margin="8,0,0,0" ToolTip="Previous channel" Click="Previous_Click" />
                                 <Button x:Name="NextButton" Style="{StaticResource GhostButton}" Width="42" Margin="8,0,0,0" ToolTip="Next channel" Click="Next_Click" />
+                                <Button x:Name="RecordButton" Style="{StaticResource GhostButton}" Width="42" Padding="10,8" Margin="8,0,0,0" ToolTip="Record the playing live channel" AutomationProperties.Name="Record the playing live channel" Click="Record_Click" IsEnabled="False" />
+                                <Button x:Name="StopRecordingButton" Style="{StaticResource GhostButton}" Width="42" Padding="10,8" Margin="5,0,0,0" ToolTip="Stop recording" AutomationProperties.Name="Stop recording" Click="StopRecording_Click" IsEnabled="False" Visibility="Collapsed" />
+                                <Button x:Name="RestartButton" Style="{StaticResource GhostButton}" Width="42" Padding="10,8" Margin="8,0,0,0" ToolTip="Restart stream" AutomationProperties.Name="Restart stream" Click="RestartStream_Click" />
+                                <Button x:Name="FavoriteButton" Style="{StaticResource GhostButton}" Width="42" Margin="5,0,0,0" ToolTip="Favorite" AutomationProperties.Name="Favorite or unfavorite selected channel" Click="ToggleFavorite_Click" />
                                 <Button x:Name="MorePlaybackButton" Style="{StaticResource GhostButton}" Content="More" Margin="8,0,0,0" Click="MorePlayback_Click" AutomationProperties.Name="More playback actions">
                                     <Button.ContextMenu>
                                         <ContextMenu Opened="MorePlaybackMenu_Opened">
+                                            <MenuItem Header="Audio track" SubmenuOpened="AudioTrackMenu_Opened">
+                                                <MenuItem Header="No audio tracks available" IsEnabled="False" />
+                                            </MenuItem>
                                             <MenuItem Header="Open recent recording" Click="OpenRecentRecording_Click" />
-                                            <MenuItem Header="Restart stream" Click="RestartStream_Click" />
-                                            <MenuItem Header="Previous channel" Click="Previous_Click" />
-                                            <MenuItem Header="Next channel" Click="Next_Click" />
                                             <MenuItem Header="Copy playing stream URL" Click="CopyStreamUrl_Click" />
                                             <MenuItem Header="Stream information" Click="ShowStreamInfo_Click" />
                                         </ContextMenu>
                                     </Button.ContextMenu>
                                 </Button>
+                                <Button x:Name="GoLiveButton" Style="{StaticResource PrimaryButton}" Content="Go Live" Margin="8,0,0,0" ToolTip="Return to the live edge and resume" Click="GoLive_Click" Visibility="Collapsed" />
                                 <Button x:Name="RetryPlaybackButton" Style="{StaticResource PrimaryButton}" Content="Retry" Margin="8,0,0,0" Visibility="Collapsed" Click="RestartStream_Click" />
                             </StackPanel>
 
@@ -488,7 +494,6 @@
                             </ComboBox>
                             <TextBlock x:Name="LiveDelayText" Grid.Column="2" Text="" VerticalAlignment="Center" HorizontalAlignment="Right" Foreground="{DynamicResource Text2Brush}" FontWeight="SemiBold" Margin="12,0,0,0" Visibility="Collapsed" />
                             <Button x:Name="RewindLiveButton" Grid.Column="3" Style="{StaticResource GhostButton}" Content="−30s" Margin="8,0,0,0" ToolTip="Rewind the current live stream by 30 seconds" Click="RewindLive_Click" IsEnabled="False" Visibility="Collapsed" />
-                            <Button x:Name="RestartButton" Grid.Column="5" Style="{StaticResource GhostButton}" Margin="8,0,0,0" ToolTip="Restart stream" Click="RestartStream_Click" />
                             <Button x:Name="CopyUrlButton" Grid.Column="6" Style="{StaticResource GhostButton}" Margin="8,0,0,0" ToolTip="Copy stream URL" Click="CopyStreamUrl_Click" />
                         </Grid>
 

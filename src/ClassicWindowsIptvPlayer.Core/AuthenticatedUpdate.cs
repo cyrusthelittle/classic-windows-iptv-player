@@ -79,7 +79,7 @@ public static class AuthenticatedUpdate
             if (part is "" or "." or ".." || part.EndsWith('.') || part.EndsWith(' ') || part.Any(c => c < 32 || "<>\"|?*".Contains(c)) ||
                 Regex.IsMatch(part, @"^(CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(\.|$)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
                 throw new InvalidDataException("Unsafe update path.");
-            if (new[] { "cache", "logs", "updates", "Recordings", "pre-migration" }.Contains(part, StringComparer.OrdinalIgnoreCase) || part.StartsWith("accounts", StringComparison.OrdinalIgnoreCase))
+            if (new[] { "cache", "logs", "updates", "Recordings", "playlists", "temp", "pre-migration" }.Contains(part, StringComparer.OrdinalIgnoreCase) || part.StartsWith("accounts", StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("Updates cannot contain saved user data.");
         }
         var ext = Path.GetExtension(path).ToLowerInvariant();

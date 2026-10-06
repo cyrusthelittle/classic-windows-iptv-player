@@ -1017,7 +1017,7 @@ public sealed class LiveTimeshiftBuffer : IDisposable
         _maximumBytes = maximumBytes;
         _maximumDuration = maximumDuration ?? TimeSpan.FromMinutes(30);
         if (_maximumDuration <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(maximumDuration));
-        var root = Path.GetFullPath(temporaryRoot ?? Path.GetTempPath());
+        var root = Path.GetFullPath(temporaryRoot ?? ClassicWindowsIptvPlayer.Core.AppDataPaths.Temp);
         Directory.CreateDirectory(root);
         CleanupStaleDirectoriesOnce(root);
         _directory = Path.Combine(root, "cyrus-timeshift-" + Guid.NewGuid().ToString("N"));
@@ -1218,20 +1218,30 @@ public sealed record SharedHlsSegment(long Sequence, double DurationSeconds, Uri
 /// <summary>Independent bounded reader; dispose it at the exact recording stop action.</summary>
 public sealed class SharedHlsConsumer : IAsyncDisposable
 {
-    private readonly SharedHlsSource _source;
-    private readonly SharedHlsSource.Consumer _consumer;
+    private readonly SharedHlsSource? _source;
+    private readonly SharedHlsSource.Consumer? _consumer;
+    private readonly Func<CancellationToken, ValueTask<SharedHlsSegment?>>? _read;
+    private readonly Action? _detach;
     private int _disposed;
 
     internal SharedHlsConsumer(SharedHlsSource source, SharedHlsSource.Consumer consumer)
     { _source = source; _consumer = consumer; }
 
-    public SharedHlsConsumerKind Kind => _consumer.Kind;
+    internal SharedHlsConsumer(Func<CancellationToken, ValueTask<SharedHlsSegment?>> read, Action detach)
+    { _read = read; _detach = detach; }
+
+    public SharedHlsConsumerKind Kind => _consumer?.Kind ?? SharedHlsConsumerKind.Recording;
     public ValueTask<SharedHlsSegment?> ReadAsync(CancellationToken cancellationToken = default) =>
-        Volatile.Read(ref _disposed) == 0 ? _source.ReadAsync(_consumer, cancellationToken) : ValueTask.FromResult<SharedHlsSegment?>(null);
+        Volatile.Read(ref _disposed) != 0 ? ValueTask.FromResult<SharedHlsSegment?>(null) :
+        _read is not null ? _read(cancellationToken) : _source!.ReadAsync(_consumer!, cancellationToken);
 
     public ValueTask DisposeAsync()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) == 0) _source.Detach(_consumer);
+        if (Interlocked.Exchange(ref _disposed, 1) == 0)
+        {
+            if (_detach is not null) _detach();
+            else _source!.Detach(_consumer!);
+        }
         return ValueTask.CompletedTask;
     }
 }

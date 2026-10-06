@@ -271,6 +271,8 @@ public sealed class AppState
     public bool EpgEnabled { get; set; } = false;
 
     // Default destination for recordings.
+    public bool TimeshiftEnabled { get; set; } = true;
+    public int TimeshiftSeconds { get; set; } = 30;
     public string RecordingFolder { get; set; } = string.Empty;
 
     // Update checks are enabled by default. Users can turn them off from the

@@ -12,6 +12,8 @@ internal static class IconFactory
     public const string Play = "M8,5 L19,12 L8,19 Z";
     public const string Pause = "M7,5 H10 V19 H7 Z M14,5 H17 V19 H14 Z";
     public const string Stop = "M7,7 H17 V17 H7 Z";
+    public const string Record = "M12,7 C14.8,7 17,9.2 17,12 C17,14.8 14.8,17 12,17 C9.2,17 7,14.8 7,12 C7,9.2 9.2,7 12,7 Z";
+    public const string StopRecording = "F0 M12,3 A9,9 0 1 1 12,21 A9,9 0 1 1 12,3 Z M12,5 A7,7 0 1 1 12,19 A7,7 0 1 1 12,5 Z M9,9 H15 V15 H9 Z";
     public const string Next = "M16,5 H18 V19 H16 Z M6,5 L15,12 L6,19 Z";
     public const string Volume = "M4,9 H8 L13,5 V19 L8,15 H4 Z M16,9 C17,10.5 17,13.5 16,15 L18,16.5 C20,13.8 20,10.2 18,7.5 Z";
     public const string Mute = "M4,9 H8 L13,5 V19 L8,15 H4 Z M16,8 L18,10 L20,8 L21.5,9.5 L19.5,11.5 L21.5,13.5 L20,15 L18,13 L16,15 L14.5,13.5 L16.5,11.5 L14.5,9.5 Z";

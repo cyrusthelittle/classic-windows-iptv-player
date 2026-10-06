@@ -633,7 +633,7 @@ public partial class MainWindow : Window
 
     private static string GetDefaultRecordingFolder()
     {
-        return System.IO.Path.Combine(AppDataPaths.Root, "Recordings");
+        return AppDataPaths.Recordings;
     }
 
     private void ChooseRecordingFolder_Click(object sender, RoutedEventArgs e)
@@ -955,10 +955,12 @@ public partial class MainWindow : Window
         PreviousButton.Content = IconFactory.Create(IconFactory.Previous);
         PlayPauseButton.Content = IconFactory.Create(IconFactory.Play);
         StopButton.Content = IconFactory.Create(IconFactory.Stop);
+        RecordButton.Content = IconFactory.Create(IconFactory.Record);
+        StopRecordingButton.Content = IconFactory.Create(IconFactory.StopRecording);
         NextButton.Content = IconFactory.Create(IconFactory.Next);
         MuteButton.Content = IconFactory.Create(_state.Muted ? IconFactory.Mute : IconFactory.Volume);
         FullScreenButton.Content = IconFactory.Create(IconFactory.FullScreen);
-        RestartButton.Content = IconFactory.Labeled("Restart playing", IconFactory.Restart);
+        RestartButton.Content = IconFactory.Create(IconFactory.Restart);
         CopyUrlButton.Content = IconFactory.Labeled("Copy playing URL", IconFactory.Copy);
         RestartButton.ToolTip = "Restart the playing channel";
         CopyUrlButton.ToolTip = "Copy the playing channel's URL";
@@ -1510,12 +1512,17 @@ public partial class MainWindow : Window
         CancellationToken cancellationToken)
     {
         var queryParts = SplitSearchQuery(search);
-        // The index belongs to the active catalog; use it for every catalog
-        // query while retaining the remaining folder/favorite semantics below.
+        var showingFolders = (browseMode == 0 && activeFavoriteFolderId is null &&
+                              (favorites is not null || activeFolder is null)) ||
+                             (browseMode == 1 && activeLetter is null);
+        // Folder lists search their displayed names. Count their contents without
+        // searching item titles, so a matching child cannot make a folder match.
+        var itemSearch = showingFolders ? string.Empty : search;
         IEnumerable<Channel> candidates = searchIndex is null
             ? channels
-            : searchIndex.SearchAll(search, kind, cancellationToken);
-        var remainingQueryParts = searchIndex is null ? queryParts : [];
+            : searchIndex.SearchAll(itemSearch, kind, cancellationToken);
+        var remainingQueryParts = searchIndex is null && !showingFolders ? queryParts : [];
+        bool MatchesFolderName(string name) => queryParts.All(part => ContainsIgnoreCase(name, part));
         var activeFolderName = NormalizeGroupName(activeFolder);
 
         // A folder drilled into from Folders mode stays in scope even after
@@ -1553,10 +1560,10 @@ public partial class MainWindow : Window
                 counts[folderId] = count + 1;
             }
             var folders = (favoriteFolders ?? [])
-                .Where(folder => queryParts.Length == 0 || counts.ContainsKey(folder.Id) || queryParts.All(part => ContainsIgnoreCase(folder.Name, part)))
+                .Where(folder => MatchesFolderName(folder.Name))
                 .Select(folder => new FolderResult(folder.Name, counts.GetValueOrDefault(folder.Id), folder.Id))
                 .ToList();
-            if (counts.TryGetValue("", out var unfiledCount))
+            if (counts.TryGetValue("", out var unfiledCount) && MatchesFolderName("Unfiled"))
                 folders.Insert(0, new FolderResult("Unfiled", unfiledCount, ""));
             return new FilterResult { Folders = folders, CountText = $"{folders.Count:N0} folders" };
         }
@@ -1575,16 +1582,18 @@ public partial class MainWindow : Window
                 folderCounts[folder] = count + 1;
             }
 
+            var folders = folderCounts
+                .Where(pair => MatchesFolderName(pair.Key))
+                .OrderBy(pair => groupOrganization.FirstOrDefault(g => string.Equals(
+                    string.IsNullOrWhiteSpace(g.Value.Name) ? g.Key : g.Value.Name, pair.Key,
+                    StringComparison.OrdinalIgnoreCase)).Value?.Order is > 0 and var order ? order : int.MaxValue)
+                .ThenBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(pair => new FolderResult(pair.Key, pair.Value))
+                .ToList();
             return new FilterResult
             {
-                Folders = folderCounts
-                    .OrderBy(pair => groupOrganization.FirstOrDefault(g => string.Equals(
-                        string.IsNullOrWhiteSpace(g.Value.Name) ? g.Key : g.Value.Name, pair.Key,
-                        StringComparison.OrdinalIgnoreCase)).Value?.Order is > 0 and var order ? order : int.MaxValue)
-                    .ThenBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
-                    .Select(pair => new FolderResult(pair.Key, pair.Value))
-                    .ToList(),
-                CountText = $"{folderCounts.Count:N0} folders"
+                Folders = folders,
+                CountText = $"{folders.Count:N0} folders"
             };
         }
 
@@ -1605,14 +1614,16 @@ public partial class MainWindow : Window
                 letterCounts[letter] = count + 1;
             }
 
+            var folders = letterCounts
+                .Where(pair => MatchesFolderName(pair.Key))
+                .OrderBy(pair => LetterBucketOrder.IndexOf(pair.Key, StringComparison.Ordinal))
+                .Select(pair => new FolderResult(pair.Key, pair.Value))
+                .ToList();
             return new FilterResult
             {
-                Folders = letterCounts
-                    .OrderBy(pair => LetterBucketOrder.IndexOf(pair.Key, StringComparison.Ordinal))
-                    .Select(pair => new FolderResult(pair.Key, pair.Value))
-                    .ToList(),
+                Folders = folders,
                 ShowBackButton = activeFolder is not null || activeFavoriteFolderId is not null,
-                CountText = $"{letterCounts.Count:N0} folders"
+                CountText = $"{folders.Count:N0} folders"
             };
         }
 
@@ -1765,7 +1776,6 @@ public partial class MainWindow : Window
         ClearActiveSeries();
         _browseMode = 0;
         _viewMode = 0;
-        SearchBox.Clear();
         UpdateSearchScopeButtons();
         UpdateViewModeButtons();
         ApplyFilters();
@@ -1887,7 +1897,34 @@ public partial class MainWindow : Window
 
     private void SetBrowseMode(int browseMode)
     {
-        _browseMode = Math.Clamp(browseMode, 0, 2);
+        var nextMode = Math.Clamp(browseMode, 0, 2);
+        if (nextMode == 0 && (_browseMode != 0 || _activeSeriesId is not null))
+        {
+            // Episodes may use a synthetic Season group. Return to the catalog
+            // series' category rather than deriving a folder from an episode.
+            var selected = _activeSeriesId is { } seriesId
+                ? _channels.FirstOrDefault(channel => SeriesPlaceholder.TryGetSeriesId(channel, out var id) &&
+                    string.Equals(id, seriesId, StringComparison.OrdinalIgnoreCase))
+                : (ChannelList.SelectedItem as ChannelListEntry)?.Channel;
+            if (selected is not null)
+            {
+                if (_viewMode == 1)
+                {
+                    var itemKey = ItemIdentity.For(selected);
+                    if (_activeFavoriteFolderId is null)
+                        _activeFavoriteFolderId = _state.FavoriteFolders.FirstOrDefault(folder =>
+                            folder.ChannelIds.Contains(itemKey, StringComparer.OrdinalIgnoreCase))?.Id ?? "";
+                }
+                else if (_viewMode == 0 &&
+                         (selected.MediaKind != MediaKind.Series || SeriesPlaceholder.TryGetSeriesId(selected, out _) ||
+                          _channels.Contains(selected)))
+                {
+                    _activeFolder = NormalizeGroupName(selected.Group);
+                }
+                _playbackState.Select(selected);
+            }
+        }
+        _browseMode = nextMode;
         // Keep whatever folder you've drilled into (e.g. via Folders mode) so
         // switching to A-Z buckets just that folder instead of everything.
         _activeLetter = null;
@@ -2108,6 +2145,12 @@ public partial class MainWindow : Window
 
     private void ChannelList_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
+        if (e.ChangedButton != MouseButton.Left) return;
+        // The ListBox also receives double-clicks from its scrollbar and empty
+        // space. Only an actual item row should open a channel or folder.
+        var item = ItemsControl.ContainerFromElement(ChannelList, e.OriginalSource as DependencyObject) as ListBoxItem;
+        if (item?.DataContext is not ChannelListEntry entry) return;
+        ChannelList.SelectedItem = entry;
         ActivateSelectedListEntry();
     }
 
@@ -2142,6 +2185,7 @@ public partial class MainWindow : Window
             _activeFolder = null;
         }
 
+        SearchBox.Clear();
         await ApplyFiltersAsync();
         RestoreListSelectionAfterBack(restoreFolderOrLetterName, restoreSeriesId);
         if (restoreSeriesId is not null && _seriesReturnOffset is { } offset)
@@ -2202,6 +2246,7 @@ public partial class MainWindow : Window
             {
                 _activeFavoriteFolderId = entry.FavoriteFolderId;
                 _activeLetter = null;
+                SearchBox.Clear();
                 ApplyFilters();
             }
             else EnterFolder(entry.FolderName);
@@ -2277,6 +2322,7 @@ public partial class MainWindow : Window
         {
             _activeLetter = folderName;
         }
+        SearchBox.Clear();
         ApplyFilters();
         if (_visibleEntries.Count > 0)
         {
@@ -2478,6 +2524,7 @@ public partial class MainWindow : Window
                 .ThenBy(episode => ViewingHistory.EpisodeOrder(episode).Episode).ThenBy(episode => episode.Name).ToList();
             _activeSeriesRevision = PreparedLibraryCache.Revision(account, new(), _store.ChannelCacheRevision(accountId));
             _activeSeason = null;
+            SearchBox.Clear();
             SeasonPicker.Items.Clear();
             SeasonPicker.Items.Add("All seasons");
             foreach (var season in _activeSeriesEpisodes.Select(episode => ViewingHistory.EpisodeOrder(episode).Season)
@@ -4113,17 +4160,18 @@ public partial class MainWindow : Window
         {
             StatusText.Text = "Checking account...";
             var selected = _state.EnsureSelectedAccount();
+            var account = selected.Settings.Clone();
             var local = $"Account: {selected.DisplayName}\n" +
                 $"Saved library: {(_store.HasChannelCacheForAccount(selected.Id) ? "Available" : "Not available")}\n" +
                 $"Last successful refresh: {(selected.LastPlaylistUpdatedUtc is { } updated ? updated.ToLocalTime().ToString("g") : "Not yet recorded")}\n\n";
-            if (string.IsNullOrWhiteSpace(_state.Account.ServerUrl) || string.IsNullOrWhiteSpace(_state.Account.Username))
+            if (!PlaylistService.SupportsAccountInformation(account))
             {
-                MessageBox.Show(this, local + "Connection use and expiry are unavailable for this playlist account.", "Account information", MessageBoxButton.OK, MessageBoxImage.Information);
+                MessageBox.Show(this, local + "This playlist link does not provide provider account details. Expiry, status and connection limits are unavailable.", "Account information", MessageBoxButton.OK, MessageBoxImage.Information);
             }
             else
             {
                 using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-                var info = await _playlistService.FetchAccountInfoSummaryAsync(_state.Account, timeout.Token);
+                var info = await _playlistService.FetchAccountInfoSummaryAsync(account, timeout.Token);
                 MessageBox.Show(this, local + info, "Account information", MessageBoxButton.OK, MessageBoxImage.Information);
             }
             StatusText.Text = "Ready";
@@ -4572,23 +4620,6 @@ public partial class MainWindow : Window
         return new FeedbackOutbox(Path.Combine(directory, "feedback-outbox.dat"), endpoint);
     }
 
-    private void FeedbackEndpoint_Click(object sender, RoutedEventArgs e) => EditFeedbackEndpoint(this);
-
-    private bool EditFeedbackEndpoint(Window owner)
-    {
-        var dialog = new FeedbackEndpointWindow(_state.FeedbackEndpoint) { Owner = owner };
-        if (dialog.ShowDialog() != true) return false;
-
-        _state.FeedbackEndpoint = dialog.Endpoint ?? string.Empty;
-        _store.Save(_state);
-        _feedbackOutbox.Dispose();
-        _feedbackOutbox = CreateFeedbackOutbox(_state);
-        StatusText.Text = string.IsNullOrEmpty(_state.FeedbackEndpoint)
-            ? "Feedback delivery is not configured."
-            : "Feedback endpoint saved in protected local settings.";
-        return !string.IsNullOrEmpty(_state.FeedbackEndpoint);
-    }
-
     private async void Feedback_Click(object sender, RoutedEventArgs e)
     {
         try
@@ -4596,7 +4627,7 @@ public partial class MainWindow : Window
             var queued = await _feedbackOutbox.GetPendingAsync();
             var previous = queued.FirstOrDefault(item => item.Type == "feedback");
             FeedbackWindow? dialog = null;
-            dialog = new FeedbackWindow((message, includeLogs) => SendFeedbackAsync(message, includeLogs, dialog!), previous?.Message,
+            dialog = new FeedbackWindow((message, includeLogs) => SendFeedbackAsync(message, includeLogs), previous?.Message,
                 includeLogs: previous is null || previous.Log is not null) { Owner = this };
             dialog.ShowDialog();
         }
@@ -4607,7 +4638,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task<FeedbackDeliveryResult> SendFeedbackAsync(string message, bool includeLogs, Window owner)
+    private async Task<FeedbackDeliveryResult> SendFeedbackAsync(string message, bool includeLogs)
     {
         var queued = await _feedbackOutbox.GetPendingAsync();
         var existing = queued.FirstOrDefault(item => item.Type == "feedback" &&
@@ -4618,19 +4649,11 @@ public partial class MainWindow : Window
             item = existing with { Message = message.Trim(), Log = log };
         else
             item = await _feedbackOutbox.EnqueueFeedbackAsync(message, log);
-        if (!AppState.TryValidateFeedbackEndpoint(_state.FeedbackEndpoint, out _))
-        {
-            // The Send click is explicit consent to deliver this message. Ask for
-            // the HTTPS destination only when delivery is actually requested.
-            if (!EditFeedbackEndpoint(owner))
-                return new(false, "Feedback is safely queued. Configure its HTTPS endpoint in Settings, then press Send again.", true);
-        }
-
         var result = await _feedbackOutbox.SendAsync(item.Id);
         return result.Status switch
         {
             FeedbackDeliveryStatus.Sent => new(true, "Feedback sent."),
-            FeedbackDeliveryStatus.EndpointNotConfigured => new(false, "Feedback is safely queued. Configure its HTTPS endpoint in Settings, then press Send again.", true),
+            FeedbackDeliveryStatus.EndpointNotConfigured => new(false, "Feedback is safely queued. Delivery is unavailable; try again later.", true),
             FeedbackDeliveryStatus.QueuedForRetry => new(false, "Delivery failed. The message is saved on this device; press Send to retry.", true),
             _ => new(false, "No message was sent. The queued message is still saved.", true)
         };

@@ -26,11 +26,13 @@ public sealed class MissingAccountSettingsException : IOException
         string? stage = null;
         try
         {
-            var primary = Path.Combine(DataRoot, "accounts.json");
+            var accounts = Path.Combine(DataRoot, "accounts");
+            Directory.CreateDirectory(accounts);
+            var primary = Path.Combine(accounts, "accounts.json");
             if (File.Exists(primary) || File.Exists(primary + ".bak"))
                 throw new IOException("Account settings were restored. Reopen the app to use them; no files were replaced.");
             Directory.CreateDirectory(DataRoot);
-            stage = Path.Combine(DataRoot, ".fresh-settings-" + Guid.NewGuid().ToString("N"));
+            stage = Path.Combine(DataRoot, "temp", ".fresh-settings-" + Guid.NewGuid().ToString("N"));
             var store = new ConfigStore(stage);
             store.Save(new AppState { RecordingFolder = _recordingFolder });
             _ = store.Load();
@@ -44,7 +46,7 @@ public sealed class MissingAccountSettingsException : IOException
             try
             {
                 if (stage is not null && Directory.Exists(stage) &&
-                    string.Equals(Path.GetDirectoryName(Path.GetFullPath(stage)), Path.TrimEndingDirectorySeparator(Path.GetFullPath(DataRoot)), StringComparison.OrdinalIgnoreCase))
+                    string.Equals(Path.GetDirectoryName(Path.GetFullPath(stage)), Path.Combine(Path.GetFullPath(DataRoot), "temp"), StringComparison.OrdinalIgnoreCase))
                 {
                     AuthenticatedUpdate.RejectLinks(stage);
                     // The stage's sole directory is an empty cache created by ConfigStore.

@@ -64,7 +64,7 @@ public sealed class PlaylistService
             // catalogs load can cause the provider to close the connection. The
             // file is deleted automatically when its handle closes, including on
             // normal cancellation or exceptions.
-            var tempPath = Path.Combine(Path.GetTempPath(), "cyrus-iptv-" + Guid.NewGuid().ToString("N") + ".m3u");
+            var tempPath = Path.Combine(AppDataPaths.Temp, "cyrus-iptv-" + Guid.NewGuid().ToString("N") + ".m3u");
             await using var playlistFile = new FileStream(tempPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None,
                 128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan | FileOptions.DeleteOnClose);
             var downloadTimer = Stopwatch.StartNew();
@@ -439,6 +439,8 @@ public sealed class PlaylistService
     }
 
 
+    public static bool SupportsAccountInformation(AccountSettings account) => TryResolveXtreamAccount(account) is not null;
+
     public async Task<string> FetchAccountInfoSummaryAsync(AccountSettings account, CancellationToken cancellationToken)
     {
         var apiUrl = BuildPlayerApiUrl(account);
@@ -449,12 +451,14 @@ public sealed class PlaylistService
         using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
         var root = document.RootElement;
 
-        var userInfo = root.TryGetProperty("user_info", out var ui) ? ui : default;
+        if (root.ValueKind != JsonValueKind.Object ||
+            !root.TryGetProperty("user_info", out var userInfo) || userInfo.ValueKind != JsonValueKind.Object)
+            throw new InvalidOperationException("The provider did not return account information.");
         var serverInfo = root.TryGetProperty("server_info", out var si) ? si : default;
 
         string Get(JsonElement element, string name)
         {
-            if (element.ValueKind == JsonValueKind.Undefined || !element.TryGetProperty(name, out var value)) return string.Empty;
+            if (element.ValueKind != JsonValueKind.Object || !element.TryGetProperty(name, out var value)) return string.Empty;
             return value.ValueKind switch
             {
                 JsonValueKind.String => value.GetString() ?? string.Empty,

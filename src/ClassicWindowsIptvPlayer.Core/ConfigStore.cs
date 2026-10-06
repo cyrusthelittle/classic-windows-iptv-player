@@ -18,6 +18,7 @@ public sealed class ConfigStore
     private const string RetiredScheduledRecordingIndexPrefix = "scheduled-recordings-";
     private static readonly byte[] Entropy = Encoding.UTF8.GetBytes("ClassicWindowsIptvPlayer local data v2");
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true, PropertyNameCaseInsensitive = true };
+    private readonly bool _portableLayout;
     private readonly string _appFolder;
     private readonly string _statePath;
     private readonly string _channelCachePath;
@@ -25,8 +26,10 @@ public sealed class ConfigStore
     public ConfigStore(string? dataDirectory = null)
     {
         var root = dataDirectory ?? AppDataPaths.Root;
+        _portableLayout = dataDirectory is null;
         _appFolder = Path.Combine(root, "cache");
-        _statePath = Path.Combine(root, "accounts.json");
+        _statePath = Path.Combine(dataDirectory is null || Directory.Exists(Path.Combine(root, "accounts")) ? Path.Combine(root, "accounts") : root, "accounts.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(_statePath)!);
         _channelCachePath = Path.Combine(_appFolder, "channels.json.gz");
         Directory.CreateDirectory(_appFolder);
     }
@@ -65,8 +68,51 @@ public sealed class ConfigStore
             AtomicWrite(_statePath, Protect(JsonSerializer.SerializeToUtf8Bytes(state, JsonOptions)), replaceBackup: false);
             RecoveryNotice = "Settings were upgraded. Original settings and cache were kept as .migration.bak files. Favorites that could not be matched remain saved for a later provider refresh.";
         }
+        if (_portableLayout) NormalizePortableFiles(state);
         MarkInterruptedRecordings(state);
         return state;
+    }
+
+    private void NormalizePortableFiles(AppState state)
+    {
+        var recordings = AppDataPaths.Recordings;
+        string Import(string source, string folder)
+        {
+            var full = Path.GetFullPath(source);
+            if (!File.Exists(full)) return source;
+            if (full.StartsWith(Path.GetFullPath(folder) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return full;
+            var target = Path.Combine(folder, Path.GetFileName(full));
+            if (File.Exists(target))
+            {
+                using var a = File.OpenRead(full);
+                using var b = File.OpenRead(target);
+                if (!SHA256.HashData(a).SequenceEqual(SHA256.HashData(b)))
+                    target = Path.Combine(folder, Path.GetFileNameWithoutExtension(full) + "-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(full)))[..12] + Path.GetExtension(full));
+            }
+            if (!File.Exists(target)) File.Copy(full, target, false);
+            return target;
+        }
+        var changed = state.RecordingFolder != recordings;
+        if (!string.IsNullOrWhiteSpace(state.RecordingFolder) && Directory.Exists(state.RecordingFolder) &&
+            !Path.GetFullPath(state.RecordingFolder).Equals(recordings, StringComparison.OrdinalIgnoreCase))
+            foreach (var file in Directory.GetFiles(state.RecordingFolder)) Import(file, recordings);
+        state.RecordingFolder = recordings;
+        foreach (var account in state.Accounts ?? [])
+        {
+            var playlist = account.Settings.M3uUrl;
+            if (Uri.TryCreate(playlist, UriKind.Absolute, out var uri) && uri.IsFile) playlist = uri.LocalPath;
+            if (File.Exists(playlist))
+            {
+                var imported = Import(playlist, AppDataPaths.Playlists);
+                if (imported != account.Settings.M3uUrl) { account.Settings.M3uUrl = imported; changed = true; }
+            }
+            var index = LoadRecordingIndex(account.Id);
+            if (index is null) continue;
+            var originalEntries = index.Entries ?? [];
+            var entries = originalEntries.Select(entry => string.IsNullOrWhiteSpace(entry.FilePath) ? entry : entry with { FilePath = Import(entry.FilePath, recordings) }).ToList();
+            if (!entries.SequenceEqual(originalEntries)) { index.Entries = entries; SaveRecordingIndex(account.Id, index); }
+        }
+        if (changed) Save(state);
     }
 
     public void Save(AppState state)
@@ -479,7 +525,7 @@ public sealed class ConfigStore
             using var gzip = new GZipStream(input, CompressionMode.Decompress);
             var index = JsonSerializer.Deserialize<RecordingIndex>(gzip, JsonOptions)!;
             if (index.Version > RecordingIndex.CurrentVersion) throw new InvalidDataException("Recording index requires a newer app version.");
-            index.Entries = index.Entries.Select(entry => string.IsNullOrWhiteSpace(entry.FilePath) ? entry :
+            index.Entries = (index.Entries ?? []).Select(entry => string.IsNullOrWhiteSpace(entry.FilePath) ? entry :
                 entry with { FilePath = Path.GetFullPath(entry.FilePath, legacyRoot) }).ToList();
             index.Normalize();
             using var output = new MemoryStream();

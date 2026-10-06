@@ -158,18 +158,22 @@ In full screen, `Up`/`Down` also control volume, and `Left`/`Right` change the c
 
 Choose **Settings > Phone remote on/off** to enable the phone browser remote. The player shows local network addresses to open on your phone; both devices must be on the same trusted Wi-Fi network. The phone remote sends navigation and playback commands to the PC. It does not mirror the PC screen or use Phone Link. The listener is disabled by default; turn it off when you are finished. It has no login or encrypted connection, so do not enable it on a public or shared network.
 
-## Portable data and privacy
+## Data storage and privacy
 
-The application stores its data beside the executable:
+Accounts, playlists and their caches are stored in the Windows user data folder. Recordings and diagnostic logs stay beside the executable:
 
 ```text
-accounts/accounts.json        Accounts and application settings
-cache/channels-<account>.json.gz
+%LOCALAPPDATA%/ClassicWindowsIptvPlayer/accounts/
+                              Accounts and application settings
+%LOCALAPPDATA%/ClassicWindowsIptvPlayer/playlists/
+                              Imported local playlists
+%LOCALAPPDATA%/ClassicWindowsIptvPlayer/cache/
                               Per-account compressed playlist caches
+Recordings/                   Recording files
 logs/                         Runtime and crash logs
 ```
 
-Keep `accounts.json` private because it may contain provider credentials. Playlist caches and logs may also contain provider or channel information. Moving the entire extracted folder moves the application and its saved data together.
+Keep the user data folder private because it may contain provider credentials and channel information. Moving the application folder does not move accounts or playlists.
 
 Outbound connections fetch the playlist or programme guide from the provider you
 entered and, optionally, check GitHub for a release under **Settings**. When
@@ -249,6 +253,6 @@ For a downloaded release, extract the ZIP again and keep the complete folder tog
 
 This project is a media player, not an IPTV service. It provides no paid subscriptions, private playlists, or copyrighted streams. You are responsible for complying with your provider's terms and all applicable laws.
 
-App data is stored in folders beside the executable: `accounts`, `cache`, `playlists`, `Recordings`, `logs`, `updates`, and `temp`. AppData is read only to import old saved data on the first portable launch; originals are retained for recovery. Keep the app in a writable folder. There is no AppData fallback.
+Accounts, playlists, cache, and update state are stored in `%LOCALAPPDATA%\ClassicWindowsIptvPlayer`. Recordings and logs stay in folders beside the executable. Keep the app folder writable for recordings and logs.
 
 Enable or disable live timeshift under **More ? Enable timeshift**. It is enabled for new settings; existing saved preferences are preserved. Toggling it restarts the current live stream. Choose **Timeshift buffer duration** in the playback menu to retain 30, 60, 90, or 120 seconds of rewind history. Live inputs are remuxed without re-encoding into one sparse `temp/timeshift-*/session.ts` file per tune. During normal playback, expired TS data is released from disk and the seek bar covers only the configured buffer window. The writer keeps recording while an independent reader is paused and preserves the paused position; disk use grows for the pause duration so that point stays available. As playback advances or Go Live moves to the current edge, the buffer shrinks back to the configured duration. Resume retains the same decoder and read position; seeking opens another timestamp in that same file. Go Live resumes at the newest decodable recorded edge without opening a second provider connection. The pause counter shows seconds spent in the current pause. The timeline is also available after pausing with rewind controls disabled. A sparse file's logical length continues to reflect the whole session, while its allocated disk blocks are limited to retained history plus a small alignment margin. Formats VLC cannot remux or filesystems without sparse-file support fall back to direct viewing and display timeshift as unavailable. Movies and series show elapsed / total duration throughout playback.

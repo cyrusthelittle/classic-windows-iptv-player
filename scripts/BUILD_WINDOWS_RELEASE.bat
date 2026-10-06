@@ -10,7 +10,7 @@ if errorlevel 1 (
   exit /b 1
 )
 
-if exist release\classic-windows-iptv-player rmdir /s /q release\classic-windows-iptv-player
+REM Preserve portable user data when rebuilding an existing release folder.
 mkdir release\classic-windows-iptv-player
 
 dotnet publish src\ClassicWindowsIptvPlayer.Windows\ClassicWindowsIptvPlayer.Windows.csproj -c Release -r win-x64 --self-contained true -o release\classic-windows-iptv-player /p:PublishSingleFile=false --nologo
@@ -23,9 +23,10 @@ if errorlevel 1 (
 REM Ship the shared free-to-air accounts. Seeded from the tracked fixture, so a
 REM fresh build has working channels on first launch. Users can delete or replace
 REM accounts.json; the app recreates it on next sign-in.
-copy /y fixtures\accounts.json release\classic-windows-iptv-player\accounts.json >nul
-if exist release\classic-windows-iptv-player\logs rmdir /s /q release\classic-windows-iptv-player\logs
-if exist release\classic-windows-iptv-player\cache rmdir /s /q release\classic-windows-iptv-player\cache
+if not exist release\classic-windows-iptv-player\accounts mkdir release\classic-windows-iptv-player\accounts
+if not exist release\classic-windows-iptv-player\accounts\accounts.json if not exist release\classic-windows-iptv-player\accounts.json copy /y fixtures\accounts.json release\classic-windows-iptv-player\accounts\accounts.json >nul
+
+
 
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\RepairWindowsLibVlc.ps1
 

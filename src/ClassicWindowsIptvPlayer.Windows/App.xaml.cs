@@ -235,14 +235,15 @@ public partial class App : WpfApplication
             if (!AppState.TryValidateFeedbackEndpoint(supplied, out var endpoint))
                 throw new InvalidDataException();
 
-            if (!string.IsNullOrWhiteSpace(state.FeedbackEndpoint))
+            if (AppState.TryValidateFeedbackEndpoint(state.FeedbackEndpoint, out var current) &&
+                Uri.Equals(current, endpoint))
             {
-                if (AppState.TryValidateFeedbackEndpoint(state.FeedbackEndpoint, out var current) &&
-                    Uri.Equals(current, endpoint))
-                    File.Delete(bootstrapPath);
+                File.Delete(bootstrapPath);
                 return;
             }
 
+            // A build-supplied endpoint is the app's managed destination and
+            // takes precedence over an older locally saved destination.
             state.FeedbackEndpoint = endpoint!.AbsoluteUri;
             store.Save(state);
             var persisted = store.Load().FeedbackEndpoint;
@@ -279,22 +280,14 @@ public partial class App : WpfApplication
             dialog = new CrashReportWindow(crash.Log ?? string.Empty, async (log, message) =>
             {
                 await outbox.UpdateMessageAsync(crash.Id, message);
-                if (!AppState.TryValidateFeedbackEndpoint(state.FeedbackEndpoint, out var endpoint))
-                {
-                    var endpointDialog = new FeedbackEndpointWindow(state.FeedbackEndpoint) { Owner = dialog! };
-                    if (endpointDialog.ShowDialog() != true ||
-                        !AppState.TryValidateFeedbackEndpoint(endpointDialog.Endpoint, out endpoint))
-                        return new FeedbackDeliveryResult(false, "The report is saved on this device. Set an HTTPS endpoint to retry.", true);
-                    state.FeedbackEndpoint = endpointDialog.Endpoint ?? string.Empty;
-                    store.Save(state);
-                    outbox.ConfigureEndpoint(endpoint!);
-                }
+                if (!AppState.TryValidateFeedbackEndpoint(state.FeedbackEndpoint, out _))
+                    return new FeedbackDeliveryResult(false, "The report is saved on this device. Delivery is unavailable; try again later.", true);
 
                 var result = await outbox.SendAsync(crash.Id);
                 return result.Status switch
                 {
                     FeedbackDeliveryStatus.Sent => new FeedbackDeliveryResult(true, "Crash report sent."),
-                    FeedbackDeliveryStatus.EndpointNotConfigured => new FeedbackDeliveryResult(false, "The report is saved on this device. Set an HTTPS endpoint to retry.", true),
+                    FeedbackDeliveryStatus.EndpointNotConfigured => new FeedbackDeliveryResult(false, "The report is saved on this device. Delivery is unavailable; try again later.", true),
                     FeedbackDeliveryStatus.QueuedForRetry => new FeedbackDeliveryResult(false, "Delivery failed. The report is saved on this device and can be retried.", true),
                     _ => new FeedbackDeliveryResult(false, "The report remains saved on this device.", true)
                 };
