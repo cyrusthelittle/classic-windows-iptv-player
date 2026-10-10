@@ -54,7 +54,7 @@
                            Foreground="Black"
                            TextTrimming="CharacterEllipsis" />
 
-                <Slider x:Name="FullSeekSlider"
+                <Slider Style="{StaticResource PlaybackSeekStyle}" IsMoveToPointEnabled="True" x:Name="FullSeekSlider"
                         Grid.Row="1"
                         Minimum="0"
                         Maximum="1000"

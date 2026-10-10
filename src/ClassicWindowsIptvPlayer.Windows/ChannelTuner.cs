@@ -792,8 +792,8 @@ public sealed class ChannelTuner : IDisposable
                 {
                     try
                     {
-                    fileSource = new ContinuousTimeshiftSource(_libVlc, request.Url, request.BufferMs,
-                        request.TimeshiftSeconds is >= 1 and <= 120 ? request.TimeshiftSeconds : Volatile.Read(ref _timeshiftRetentionSeconds));
+                        fileSource = new ContinuousTimeshiftSource(_libVlc, request.Url, request.BufferMs,
+                            request.TimeshiftSeconds is >= 1 and <= 120 ? request.TimeshiftSeconds : Volatile.Read(ref _timeshiftRetentionSeconds));
                         mediaUrl = (await fileSource.StartPlaybackAsync(cancellationToken).ConfigureAwait(false)).AbsoluteUri;
                     }
                     catch (Exception exception) when (!cancellationToken.IsCancellationRequested)

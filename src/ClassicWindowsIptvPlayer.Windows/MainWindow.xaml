@@ -17,7 +17,8 @@
             <RowDefinition x:Name="StatusRow" Height="28" />
         </Grid.RowDefinitions>
 
-        <Menu x:Name="AppMenu" Grid.Row="0" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource Text0Brush}">
+        <Grid Grid.Row="0" Background="{DynamicResource PanelBrush}">
+        <Menu x:Name="AppMenu" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource Text0Brush}" Margin="0,0,116,0">
             <MenuItem Header="Account">
                 <MenuItem Header="Information" Click="AccountInfo_Click" />
                 <MenuItem Header="Export organization (no credentials)..." Click="ExportOrganization_Click" />
@@ -45,16 +46,6 @@
                 <MenuItem Header="Previous   Left" Click="Previous_Click" />
                 <MenuItem Header="Next   Right" Click="Next_Click" />
                 <Separator />
-                <MenuItem x:Name="GoLiveMenuItem" Header="Go live" Click="GoLive_Click" IsEnabled="False" />
-                <MenuItem x:Name="RewindLiveMenuItem" Header="Rewind 30 seconds" Click="RewindLive_Click" IsEnabled="False" />
-                <Separator />
-                <MenuItem x:Name="TimeshiftMenu" Header="Enable timeshift" IsCheckable="True" Click="TimeshiftToggle_Click" />
-                <MenuItem x:Name="TimeshiftSecondsMenu" Header="Timeshift buffer duration">
-                    <MenuItem Header="30 seconds" Tag="30" IsCheckable="True" Click="TimeshiftSeconds_Click" />
-                    <MenuItem Header="60 seconds" Tag="60" IsCheckable="True" Click="TimeshiftSeconds_Click" />
-                    <MenuItem Header="90 seconds" Tag="90" IsCheckable="True" Click="TimeshiftSeconds_Click" />
-                    <MenuItem Header="120 seconds" Tag="120" IsCheckable="True" Click="TimeshiftSeconds_Click" />
-                </MenuItem>
                                             <MenuItem Header="Restart stream" Click="RestartStream_Click" />
                 <MenuItem Header="Copy selected stream URL" Click="CopyStreamUrl_Click" />
                 <Separator />
@@ -67,6 +58,8 @@
             <MenuItem Header="Settings" SubmenuOpened="SettingsMenu_Opened">
                 <MenuItem x:Name="BackgroundPlaylistRefreshMenuItem" Header="Update playlist in the background every time I open this account" IsCheckable="True" Click="ToggleBackgroundPlaylistRefresh_Click" />
                 <MenuItem Header="Open recordings folder" Click="ChooseRecordingFolder_Click" />
+                <Separator />
+                <MenuItem Header="Video adjustments..." Click="VideoAdjustments_Click" />
                 <Separator />
                 <MenuItem Header="Buffer 1 sec" Click="Buffer1_Click" />
                 <MenuItem Header="Buffer 3 sec" Click="Buffer3_Click" />
@@ -106,6 +99,12 @@
                 <MenuItem Header="About" Click="About_Click" />
             </MenuItem>
         </Menu>
+        <Button x:Name="TopmostButton" HorizontalAlignment="Right" VerticalAlignment="Center"
+                Margin="0,0,8,0" Padding="10,5" MinWidth="102"
+                Style="{StaticResource GhostButton}" Content="Keep on top"
+                ToolTip="Keep the player above other windows" Click="TopmostButton_Click"
+                AutomationProperties.Name="Toggle always on top" />
+        </Grid>
 
         <Grid Grid.Row="1">
             <Grid.ColumnDefinitions>
@@ -166,7 +165,7 @@
                             <TextBlock Text="Search (Ctrl+F)" Foreground="{DynamicResource Text1Brush}" Margin="0,0,0,4" />
                             <DockPanel LastChildFill="True">
                                 <Button x:Name="ClearSearchButton" DockPanel.Dock="Right" Style="{StaticResource GhostButton}" Content="Clear" Click="ClearSearch_Click" Margin="6,0,0,0" />
-                                <TextBox x:Name="SearchBox" Height="38" TextChanged="SearchBox_TextChanged" AutomationProperties.Name="Search current library" />
+                                <TextBox x:Name="SearchBox" Height="38" TextChanged="SearchBox_TextChanged" AutomationProperties.Name="Search all media" />
                             </DockPanel>
                             <TextBlock x:Name="SearchScopeText" Foreground="{DynamicResource Text2Brush}" FontSize="12" Margin="0,4,0,0" />
                         </StackPanel>
@@ -238,6 +237,16 @@
 
                     <Grid Grid.Row="3">
                     <ListBox x:Name="ChannelList" SelectionChanged="ChannelList_SelectionChanged" MouseDoubleClick="ChannelList_MouseDoubleClick" ContextMenuOpening="ChannelList_ContextMenuOpening" ScrollViewer.CanContentScroll="True" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling" AutomationProperties.Name="Library items">
+                        <ListBox.ItemContainerStyle>
+                            <Style TargetType="ListBoxItem">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsSearchHeading}" Value="True">
+                                        <Setter Property="IsEnabled" Value="False" />
+                                        <Setter Property="Background" Value="{DynamicResource PanelBrush}" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </ListBox.ItemContainerStyle>
                         <ListBox.ItemTemplate>
                             <DataTemplate>
                                 <Grid Margin="0,4">
@@ -273,7 +282,18 @@
                                             <RowDefinition Height="Auto" />
                                             <RowDefinition Height="Auto" />
                                         </Grid.RowDefinitions>
-                                        <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsSearchHeading}" Value="True">
+                                                            <Setter Property="FontSize" Value="15" />
+                                                            <Setter Property="Foreground" Value="{DynamicResource AccentBrush}" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
                                         <TextBlock Grid.Row="1" Text="{Binding Group}" FontSize="12" Foreground="{DynamicResource Text2Brush}" TextTrimming="CharacterEllipsis" />
                                     </Grid>
                                 </Grid>
@@ -322,7 +342,7 @@
                             <MenuItem Header="Next" Click="Next_Click" />
                             <Separator />
                             <MenuItem Header="Full screen" Click="FullScreen_Click" />
-                            <MenuItem x:Name="VideoGoLiveMenuItem" Header="Go live" Click="GoLive_Click" IsEnabled="False" />
+                            <MenuItem Header="Video adjustments..." Click="VideoAdjustments_Click" />
                             <MenuItem Header="Restart stream" Click="RestartStream_Click" />
                             <MenuItem Header="Copy stream URL" Click="CopyStreamUrl_Click" />
                             <MenuItem Header="Favorite / unfavorite" Click="ToggleFavorite_Click" />
@@ -493,7 +513,6 @@
                                 <ComboBoxItem Content="10 sec" Tag="10000" />
                             </ComboBox>
                             <TextBlock x:Name="LiveDelayText" Grid.Column="2" Text="" VerticalAlignment="Center" HorizontalAlignment="Right" Foreground="{DynamicResource Text2Brush}" FontWeight="SemiBold" Margin="12,0,0,0" Visibility="Collapsed" />
-                            <Button x:Name="RewindLiveButton" Grid.Column="3" Style="{StaticResource GhostButton}" Content="−30s" Margin="8,0,0,0" ToolTip="Rewind the current live stream by 30 seconds" Click="RewindLive_Click" IsEnabled="False" Visibility="Collapsed" />
                             <Button x:Name="CopyUrlButton" Grid.Column="6" Style="{StaticResource GhostButton}" Margin="8,0,0,0" ToolTip="Copy stream URL" Click="CopyStreamUrl_Click" />
                         </Grid>
 

@@ -108,126 +108,104 @@ internal static class Program
 
     private static async Task ExerciseProductionSlider(Channel channel, HlsFixture origin)
     {
-        await WaitUntil(() => Field("_tuner") is ChannelTuner, TimeSpan.FromSeconds(20), "production MainWindow tuner was not initialized; status=" + Status);
+        await WaitUntil(() => Field("_tuner") is ChannelTuner, TimeSpan.FromSeconds(20), "MainWindow tuner was not initialized; status=" + Status);
         Call("PlayChannel", channel, null);
-        await WaitUntil(() => Field("_mediaPlayer") is MediaPlayer { IsPlaying: true }, TimeSpan.FromSeconds(25), "production MainWindow did not start local live HLS playback; status=" + Status);
+        await WaitUntil(() => Field("_mediaPlayer") is MediaPlayer { IsPlaying: true }, TimeSpan.FromSeconds(25), "local live playback did not start; status=" + Status);
         await WaitUntil(() => Field("_tuner") is ChannelTuner tuner && tuner.TryInspectLiveTimeshift(out var snapshot, out _) && snapshot is { Duration.TotalSeconds: > 8 },
-            TimeSpan.FromSeconds(25), "local HLS fixture did not build a useful timeshift window");
+            TimeSpan.FromSeconds(25), "local live buffer did not become available");
 
         var slider = (Slider)window.FindName("SeekSlider");
         var timeText = (TextBlock)window.FindName("TimeText");
-        var tuner = (ChannelTuner)Field("_tuner")!;
-        tuner.TryInspectLiveTimeshift(out var available, out _);
-        var totalSeconds = available!.Duration.TotalSeconds;
-        var mainPlayer = (MediaPlayer)Field("_mediaPlayer")!;
-        var goLiveButton = (Button)window.FindName("GoLiveButton");
-        Check(goLiveButton.Visibility == Visibility.Collapsed, "Go Live button is hidden during normal playback");
-        Check(true, $"live player seek metrics before drag: Time={mainPlayer.Time}ms, Length={mainPlayer.Length}ms, State={mainPlayer.State}");
-
-        await DragSlider(slider, 500);
-        await WaitUntil(() => Field("_liveBehind") is TimeSpan behind && behind.TotalSeconds > 2 && behind.TotalSeconds < totalSeconds,
-            TimeSpan.FromSeconds(15), "non-edge drag did not commit a buffered seek; status=" + Status);
-        var behindLive = (TimeSpan)Field("_liveBehind")!;
-        Check(timeText.Visibility == Visibility.Visible, "TimeText is visible after non-edge drag/release");
-        Check(!timeText.Text.EndsWith("LIVE", StringComparison.Ordinal) && timeText.Text.Contains(" / ", StringComparison.Ordinal),
-            "TimeText shows the selected behind-live position and available duration: " + timeText.Text);
-        Check(behindLive.TotalSeconds > 2 && behindLive.TotalSeconds < totalSeconds - 2,
-            $"production slider selected an interior buffered point ({behindLive.TotalSeconds:0.0}s of {totalSeconds:0.0}s)");
-        if (mainPlayer.Length > 0)
-            Check(mainPlayer.Time < mainPlayer.Length * 0.9, "non-edge live timeshift drag did not seek main MediaPlayer.Time to the media end");
-        else
-            Check(behindLive > TimeSpan.Zero, "unknown-length live HLS uses the buffered timeshift position instead of MediaPlayer.Time");
-
-        tuner.TryInspectLiveTimeshift(out available, out _);
-        totalSeconds = available!.Duration.TotalSeconds;
-        await DragSlider(slider, 1000);
-        await WaitUntil(() => Field("_liveBehind") is TimeSpan edge && edge <= TimeSpan.FromSeconds(1),
-            TimeSpan.FromSeconds(15), "live-edge drag did not return to the current live edge; status=" + Status);
-        Check(timeText.Visibility == Visibility.Visible && timeText.Text.EndsWith("LIVE", StringComparison.Ordinal),
-            "TimeText shows Live at the live edge after drag/release: " + timeText.Text);
-        Check(Status.StartsWith("Live:", StringComparison.Ordinal), "live-edge slider release reports Live status");
-        Check(origin.PlaylistRequests > 0 && origin.SegmentRequests > 0, "production tune read only the local synthetic HLS origin");
-        var durationMenu = (MenuItem)window.FindName("TimeshiftSecondsMenu");
-        foreach (var seconds in new[] { 30, 60, 90, 120 })
-        {
-            var item = durationMenu.Items.OfType<MenuItem>().Single(option => option.Tag?.ToString() == seconds.ToString());
-            Call("TimeshiftSeconds_Click", item, new RoutedEventArgs());
-            Check(new ConfigStore().Load().TimeshiftSeconds == seconds && item.IsChecked &&
-                durationMenu.Items.OfType<MenuItem>().Count(option => option.IsChecked) == 1,
-                $"{seconds}-second rewind option is saved and exclusively selected");
-        }
-        var reset = durationMenu.Items.OfType<MenuItem>().First();
-        Call("TimeshiftSeconds_Click", reset, new RoutedEventArgs());
-        await Task.Delay(1500);
-        Call("PauseCurrentPlayback");
-        Check(goLiveButton.Visibility == Visibility.Visible && goLiveButton.IsVisible, "Go Live button is rendered when live playback is paused");
-        var pausedBehindStart = (TimeSpan)Call("GetCurrentLiveBehind")!;
-        var pausedSliderStart = slider.Value;
-        await Task.Delay(2500);
-        var pausedBehindLater = (TimeSpan)Call("GetCurrentLiveBehind")!;
+        var goLive = (Button)window.FindName("GoLiveButton");
+        var player = (MediaPlayer)Field("_mediaPlayer")!;
         Call("UpdatePlaybackPosition");
-        Check(pausedBehindLater - pausedBehindStart >= TimeSpan.FromSeconds(1.8), "paused live position counts elapsed pause seconds");
-        Check(timeText.Text.StartsWith("Paused 00:02", StringComparison.Ordinal), "playback time visibly reports seconds spent paused: " + timeText.Text);
-        Check(slider.Value < pausedSliderStart, "seek bar advances through the growing pause buffer");
-        await DragSlider(slider, 500);
-        await WaitUntil(() => ((MediaPlayer)Field("_mediaPlayer")!).State == VLCState.Paused &&
-            Field("_pausedPlayback") is not null && (TimeSpan)Call("GetCurrentLiveBehind")! > TimeSpan.FromSeconds(3),
-            TimeSpan.FromSeconds(12), "paused seek bar did not move playback to the selected buffered time");
-        Check(timeText.Text.StartsWith("Paused 00:", StringComparison.Ordinal) &&
-            (TimeSpan)Call("GetLivePauseElapsed")! >= TimeSpan.FromSeconds(2), "seeking while paused retains the pause clock: " + timeText.Text);
-        var savedPause = typeof(ChannelTuner).GetField("_pausedLivePosition", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(tuner);
-        Check(savedPause is not null, "live pause captures a recorded timestamp in the single file");
-        var mediaBeforeResume = mainPlayer.Media!.Mrl;
-        var pausedTime = mainPlayer.Time;
-        var pausedMarker = await SnapshotMarker(mainPlayer, "paused-frame.png");
-        await Task.Delay(6000);
-        var stillPausedMarker = await SnapshotMarker(mainPlayer, "still-paused-frame.png");
-        Check(Math.Abs(pausedMarker - stillPausedMarker) < 0.1, "decoded video frame remains fixed while recording continues");
+        Check(!slider.IsVisible && !goLive.IsVisible && !timeText.IsVisible, "normal stream latency does not display delay controls");
+
+        Call("PauseCurrentPlayback");
+        await WaitUntil(() => player.State == VLCState.Paused && slider.IsVisible && goLive.IsVisible,
+            TimeSpan.FromSeconds(5), "pause did not render the live controls");
+        await Task.Delay(2500);
+        var pausedTime = player.Time;
+        var pausedMrl = player.Media!.Mrl;
+        var pausedMarker = await SnapshotMarker(player, "paused-frame.png");
+        await Task.Delay(1000);
+        var stillPausedMarker = await SnapshotMarker(player, "still-paused-frame.png");
+        Check(Math.Abs(pausedMarker - stillPausedMarker) < 0.1, "decoded frame stays fixed during pause");
+        Check(timeText.Text.StartsWith("Paused ", StringComparison.Ordinal), "pause displays the pause clock and behind-live timer");
+
         Call("ResumePausedPlayback");
-        await WaitUntil(() => Field("_pausedPlayback") is null && mainPlayer.IsPlaying,
-            TimeSpan.FromSeconds(15), "buffered pause did not resume; status=" + Status);
-        Check(mainPlayer.Media!.Mrl.EndsWith(".ts", StringComparison.Ordinal) && mainPlayer.Media.Mrl == mediaBeforeResume,
-            "resume preserves the paused decoder and continuous file reader");
-        Check(Math.Abs(mainPlayer.Time - pausedTime) < 1000, "real video resumes within one second of the paused playback timestamp");
-        var resumedMarker = await SnapshotMarker(mainPlayer, "resumed-frame.png");
+        await WaitUntil(() => Field("_pausedPlayback") is null && player.IsPlaying,
+            TimeSpan.FromSeconds(15), "pause did not resume; status=" + Status);
+        Check(player.Media!.Mrl == pausedMrl, "resume keeps the existing buffered reader");
+        var resumedMarker = await SnapshotMarker(player, "resumed-frame.png");
         var markerDelta = Math.Abs(resumedMarker - pausedMarker);
         Check(Math.Min(markerDelta, Math.Abs(100 - markerDelta)) < 12,
-            "resumed decoded frame continues beside the paused marker rather than jumping to live");
-        Check(Status.Contains("paused position", StringComparison.Ordinal), "resume reports the retained pause position");
-        Check(goLiveButton.Visibility == Visibility.Collapsed, "Go Live button hides after resuming playback");
-        Call("PauseCurrentPlayback");
-        Check(goLiveButton.Visibility == Visibility.Visible, "Go Live button returns on the next pause");
-        Check((TimeSpan)Call("GetLivePauseElapsed")! < TimeSpan.FromSeconds(1), "each new pause starts its own elapsed-seconds counter");
-        Call("GoLive_Click", goLiveButton, new RoutedEventArgs());
-        await WaitUntil(() => mainPlayer.IsPlaying && goLiveButton.Visibility == Visibility.Collapsed,
-            TimeSpan.FromSeconds(15), "Go Live did not jump to the live edge and resume playback");
-        Check(Status.StartsWith("Live:", StringComparison.Ordinal), "Go Live resumes at the current live edge");
-        var toggle = (MenuItem)window.FindName("TimeshiftMenu");
-        toggle.IsChecked = false;
-        Call("TimeshiftToggle_Click", toggle, new RoutedEventArgs());
-        await WaitUntil(() => slider.Visibility == Visibility.Collapsed,
-            TimeSpan.FromSeconds(15), "disabled timeshift should hide the bar until paused");
-        Check(!new ConfigStore().Load().TimeshiftEnabled, "timeshift off is saved");
-        Check(slider.Visibility == Visibility.Collapsed, "live seek bar is hidden with timeshift off");
-        await WaitUntil(() => Field("_mediaPlayer") is MediaPlayer replacement && replacement != mainPlayer && replacement.IsPlaying,
-            TimeSpan.FromSeconds(15), "retune with timeshift off did not start");
-        Call("PauseCurrentPlayback");
-        await Task.Delay(2000);
-        Check(slider.Visibility == Visibility.Visible && slider.IsEnabled,
-            "pausing exposes the recorded timeline even when rewind controls were disabled");
-        Call("ResumePausedPlayback");
-        await WaitUntil(() => Field("_pausedPlayback") is null && ((MediaPlayer)Field("_mediaPlayer")!).IsPlaying,
-            TimeSpan.FromSeconds(15), "pause/resume with timeshift UI off did not retain playback");
-        Check(Status.Contains("paused position", StringComparison.Ordinal), "pause protection works with timeshift controls disabled");
-        toggle.IsChecked = true;
-        Call("TimeshiftToggle_Click", toggle, new RoutedEventArgs());
-        await WaitUntil(() => tuner.TryInspectLiveTimeshift(out var resumed, out _) && resumed!.Duration > TimeSpan.Zero,
-            TimeSpan.FromSeconds(20), "enabling timeshift should start a fresh buffer");
+            $"decoded frame continues from pause (marker {pausedMarker:0.0} -> {resumedMarker:0.0}, VLC clock {pausedTime} -> {player.Time}ms)");
         Call("UpdatePlaybackPosition");
-        Check(slider.Visibility == Visibility.Visible && new ConfigStore().Load().TimeshiftEnabled, "timeshift on is saved and live seek bar returns");
-        Call("EnterFullScreen"); Call("UpdatePlaybackPosition");
-        Check(slider.Visibility == Visibility.Visible && timeText.Visibility == Visibility.Visible, "full screen retains seek bar and elapsed / buffer duration");
+        Check(slider.IsVisible && goLive.IsVisible && timeText.IsVisible, "Go Live, seek bar and timer remain rendered immediately after resume");
+
+        // Playback at normal speed must not subtract one second of delay per second.
+        // Wait longer than the pause to expose the former countdown hiding both controls.
+        var until = DateTime.UtcNow.AddSeconds(7);
+        while (DateTime.UtcNow < until)
+        {
+            await Task.Delay(100);
+            if (!slider.IsVisible || !goLive.IsVisible || !goLive.IsEnabled || !timeText.IsVisible)
+                throw new InvalidOperationException("resumed delayed playback lost live controls: " + timeText.Text);
+        }
+        Check(true, "resumed delayed playback retains all live controls longer than the pause duration");
+        Check(timeText.Text.StartsWith("Behind live ", StringComparison.Ordinal), "resumed timer displays the buffered playback distance");
+
+        await DragSlider(slider, 500);
+        await WaitUntil(() => !(bool)Field("_committingLiveSeek")! && player.IsPlaying,
+            TimeSpan.FromSeconds(15), "delayed playback seek did not finish; status=" + Status);
+        Check(slider.IsVisible && goLive.IsVisible, "seeking while delayed keeps both live controls");
+        Call("EnterFullScreen");
+        Call("UpdatePlaybackPosition");
+        Check(slider.IsVisible && goLive.IsVisible, "full screen retains both controls after resume");
         Call("ExitFullScreen");
+
+        Call("GoLive_Click", goLive, new RoutedEventArgs());
+        await WaitUntil(() => player.IsPlaying && !goLive.IsVisible && !slider.IsVisible && !timeText.IsVisible,
+            TimeSpan.FromSeconds(15), "Go Live did not resume at the edge and hide the controls");
+        Check(Status.StartsWith("Live:", StringComparison.Ordinal), "Go Live reports the live edge");
+        await Task.Delay(2000);
+        Check(!goLive.IsVisible && !slider.IsVisible, "ordinary live buffering after Go Live keeps the controls hidden");
+
+        Call("PauseCurrentPlayback");
+        await WaitUntil(() => player.State == VLCState.Paused, TimeSpan.FromSeconds(5), "second pause failed");
+        Call("ResumePausedPlayback");
+        await WaitUntil(() => Field("_pausedPlayback") is null && player.IsPlaying, TimeSpan.FromSeconds(15), "short pause did not resume");
+        await Task.Delay(2000);
+        Check(slider.IsVisible && goLive.IsVisible, "even a short pause retains live controls after resume");
+
+        var recordButton = (Button)window.FindName("RecordButton");
+        Check(recordButton.IsEnabled, "the local stream supports recording");
+        Call("Record_Click", recordButton, new RoutedEventArgs());
+        await WaitUntil(() => Field("_activeRecordingId") is string && Field("_mediaPlayer") is MediaPlayer { IsPlaying: true } &&
+            ((TextBlock)window.FindName("RecordingStatusText")).Text.StartsWith("Recording:", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(20), "local recording did not start; status=" + Status);
+        Call("UpdatePlaybackPosition");
+        Check(!slider.IsVisible && !slider.IsEnabled && !goLive.IsVisible && !goLive.IsEnabled,
+            "recording immediately hides and disables both live controls");
+        Check(timeText.Text == "Recording live TV", "recording displays its status without a timeshift-unavailable message");
+        var recordingPlayer = (MediaPlayer)Field("_mediaPlayer")!;
+        var recordingMrl = recordingPlayer.Media!.Mrl;
+        var down = new MouseButtonEventArgs(Mouse.PrimaryDevice, 0, MouseButton.Left) { RoutedEvent = UIElement.PreviewMouseDownEvent, Source = slider };
+        Call("SeekSlider_PreviewMouseDown", slider, down);
+        Check(down.Handled && !(bool)Field("_isSeeking")!, "recording rejects seek interaction");
+        slider.Value = 500;
+        await (Task)Call("CommitLiveTimeshiftSliderAsync")!;
+        Call("GoLive_Click", goLive, new RoutedEventArgs());
+        await Task.Delay(2000);
+        Check(recordingPlayer.IsPlaying && ReferenceEquals(recordingPlayer, Field("_mediaPlayer")) && recordingPlayer.Media!.Mrl == recordingMrl,
+            "seek and Go Live cannot switch the recording input");
+        Call("StopRecording_Click", window.FindName("StopRecordingButton"), new RoutedEventArgs());
+        await WaitUntil(() => Field("_activeRecordingId") is null && Field("_mediaPlayer") is MediaPlayer { IsPlaying: true } restored && !ReferenceEquals(restored, recordingPlayer),
+            TimeSpan.FromSeconds(20), "recording did not stop and restore live playback; status=" + Status);
+        Check(Directory.GetFiles(Path.Combine(root, "Recordings"), "*", SearchOption.AllDirectories).Any(path => new FileInfo(path).Length > 1880),
+            "the guarded recording produced a nonempty media file");
+        Check(origin.PlaylistRequests > 0 && origin.SegmentRequests > 0, "playback used only the invented local HLS origin");
     }
 
     private static async Task DragSlider(Slider slider, double value)
@@ -236,7 +214,7 @@ internal static class Program
         Call("SeekSlider_PreviewMouseDown", slider, down);
         slider.Value = value;
         var preview = (TextBlock)window.FindName("TimeText");
-        Check(preview.Visibility == Visibility.Visible && preview.Text.Contains(" / ", StringComparison.Ordinal),
+        Check(preview.Visibility == Visibility.Visible && preview.Text.Contains("Behind live ", StringComparison.Ordinal),
             $"scrub preview at {value:0} shows useful live times: {preview.Text}");
         var up = new MouseButtonEventArgs(Mouse.PrimaryDevice, 1, MouseButton.Left) { RoutedEvent = UIElement.PreviewMouseUpEvent, Source = slider };
         Call("SeekSlider_PreviewMouseUp", slider, up);

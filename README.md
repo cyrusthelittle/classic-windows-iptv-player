@@ -13,7 +13,7 @@ Development planning: [product, competitor and UI audit](docs/PRODUCT_AUDIT.md) 
 - **Large-library navigation:** instant multi-word search, category folders, A-Z/0-9 browsing, item view, breadcrumbs, and channel logos
 - **Personal library:** persistent favorites and the 20 most recently played items
 - **Built-in LibVLC player:** play/pause, stop, previous/next, seeking, restart, full screen, volume up to 150%, mute, and mouse-wheel volume control
-- **Live-stream controls:** pause tracking, behind-live time, and one-click **Go Live**
+- **Live-stream controls:** pause/resume, a behind-live timer, a seek bar after pausing, and a one-click **Go Live** button
 - **Programme guide:** opt-in XMLTV/XMLTV.GZ EPG with current and next programmes, descriptions, categories, and manual refresh
 - **Subtitles:** select embedded subtitle tracks or add local `.srt`, `.sub`, `.ass`, and `.ssa` files
 - **Playback diagnostics:** state, resolution, bandwidth, FPS, video/audio codecs, audio format, buffer, and current source URL
@@ -39,6 +39,8 @@ Do not copy only the EXE. Keep `libvlc.dll`, `libvlccore.dll`, and the `plugins`
 - An internet connection
 
 The release is self-contained and bundles the .NET runtime and 64-bit LibVLC. Windows SmartScreen may warn on first launch because the app is unsigned; use **More info > Run anyway** if you trust the downloaded release.
+
+The player and updater share the bundled .NET files. Keep the entire release folder together, including the updater DLL, dependency manifest and runtime configuration. Before installation, the updater and its required runtime files are copied to a separate working folder so the installed files can be replaced.
 
 ## First use
 
@@ -92,7 +94,7 @@ Search matches every word against the item name, group, and media type. Double-c
 - Double-click a channel, movie, or episode to play it.
 - Use the seek bar for seekable movies and episodes. Live streams show **Live** instead of a duration.
 - Pause and resume VOD at the same position. If a provider drops an idle connection, the player reconnects and seeks back automatically when possible.
-- Pausing live TV tracks how far playback is behind the live edge. Choose **Go Live** to restart at the live edge.
+- Pause live TV to reveal the behind-live timer, seek bar, and **Go Live** button. All three remain visible after resume. Normal-speed playback preserves the delay; use **Go Live** or seek to the live edge to hide them again. Normal stream buffering does not reveal them. The seek bar and **Go Live** hide and become unavailable during recording. Resume continues from the paused point when the provider connection remains open.
 - Use **Previous** and **Next** to move through the current filtered list.
 - Use the volume slider, `+`/`-`, or the mouse wheel over video. Volume supports 0-150% and is remembered with mute state.
 - Double-click the video or press `F11` for full screen. Full-screen controls hide automatically and reappear when the pointer moves.
@@ -255,4 +257,4 @@ This project is a media player, not an IPTV service. It provides no paid subscri
 
 Accounts, playlists, cache, and update state are stored in `%LOCALAPPDATA%\ClassicWindowsIptvPlayer`. Recordings and logs stay in folders beside the executable. Keep the app folder writable for recordings and logs.
 
-Enable or disable live timeshift under **More ? Enable timeshift**. It is enabled for new settings; existing saved preferences are preserved. Toggling it restarts the current live stream. Choose **Timeshift buffer duration** in the playback menu to retain 30, 60, 90, or 120 seconds of rewind history. Live inputs are remuxed without re-encoding into one sparse `temp/timeshift-*/session.ts` file per tune. During normal playback, expired TS data is released from disk and the seek bar covers only the configured buffer window. The writer keeps recording while an independent reader is paused and preserves the paused position; disk use grows for the pause duration so that point stays available. As playback advances or Go Live moves to the current edge, the buffer shrinks back to the configured duration. Resume retains the same decoder and read position; seeking opens another timestamp in that same file. Go Live resumes at the newest decodable recorded edge without opening a second provider connection. The pause counter shows seconds spent in the current pause. The timeline is also available after pausing with rewind controls disabled. A sparse file's logical length continues to reflect the whole session, while its allocated disk blocks are limited to retained history plus a small alignment margin. Formats VLC cannot remux or filesystems without sparse-file support fall back to direct viewing and display timeshift as unavailable. Movies and series show elapsed / total duration throughout playback.
+Movies and series show elapsed / total duration throughout playback.

@@ -137,6 +137,28 @@ public partial class App : WpfApplication
             ShowUpdateResult();
             await OfferPendingCrashReportAsync(startupStore, startupState);
 
+            var lastAccount = startupState.Accounts.FirstOrDefault(account =>
+                string.Equals(account.Id, startupState.SelectedAccountId, StringComparison.OrdinalIgnoreCase) &&
+                (account.HasLoggedIn || account.LastPlaylistUpdatedUtc is not null));
+            if (lastAccount is not null)
+            {
+                var hasCache = startupStore.HasChannelCacheForAccount(lastAccount.Id);
+                var mustUpdate = lastAccount.LastPlaylistUpdatedUtc is null || !hasCache;
+                var login = new LoginResult
+                {
+                    Account = lastAccount.Settings.Clone(),
+                    AccountId = lastAccount.Id,
+                    UpdatePlaylist = mustUpdate || lastAccount.BackgroundPlaylistRefresh
+                };
+                AppLogger.Info("Automatically opening last logged-in profile. accountId=" + lastAccount.Id + "; updatePlaylist=" + login.UpdatePlaylist);
+                var lastProfileWindow = new MainWindow(login);
+                MainWindow = lastProfileWindow;
+                ShutdownMode = ShutdownMode.OnMainWindowClose;
+                lastProfileWindow.Show();
+                lastProfileWindow.Activate();
+                return;
+            }
+
             var loginWindow = new LoginWindow();
             var result = loginWindow.ShowDialog();
             if (result != true)

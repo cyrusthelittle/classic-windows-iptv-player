@@ -54,7 +54,8 @@ public sealed class SharedHlsSource : IAsyncDisposable
         int maximumBufferedBytesPerConsumer = 16 * 1024 * 1024,
         int maximumPlaybackCacheBytes = 128 * 1024 * 1024,
         long maximumTimeshiftBytes = 2L * 1024 * 1024 * 1024,
-        TimeSpan? maximumTimeshiftDuration = null, string? timeshiftTemporaryRoot = null)
+        TimeSpan? maximumTimeshiftDuration = null, string? timeshiftTemporaryRoot = null, bool timeshiftEnabled = true,
+        bool ownsHttpClient = false)
     {
         if (playlistUri is null || !playlistUri.IsAbsoluteUri ||
             playlistUri.Scheme is not ("http" or "https"))
@@ -72,7 +73,7 @@ public sealed class SharedHlsSource : IAsyncDisposable
             AutomaticDecompression = DecompressionMethods.None,
             ConnectTimeout = TimeSpan.FromSeconds(10)
         }) { Timeout = Timeout.InfiniteTimeSpan };
-        _ownsHttp = httpClient is null;
+        _ownsHttp = httpClient is null || ownsHttpClient;
         _pollInterval = pollInterval ?? TimeSpan.FromMilliseconds(500);
         if (_pollInterval < TimeSpan.FromMilliseconds(100))
             throw new ArgumentOutOfRangeException(nameof(pollInterval), "Playlist polling cannot be faster than 100 ms.");
@@ -80,6 +81,7 @@ public sealed class SharedHlsSource : IAsyncDisposable
         _maximumBufferedBytesPerConsumer = maximumBufferedBytesPerConsumer;
         _maximumPlaybackCacheBytes = maximumPlaybackCacheBytes;
         _timeshiftBuffer = new LiveTimeshiftBuffer(maximumTimeshiftBytes, maximumTimeshiftDuration, timeshiftTemporaryRoot);
+        if (!timeshiftEnabled) _timeshiftFailure = new NotSupportedException("Timeshift is disabled.");
     }
 
     /// <summary>Raised for background fetch errors. Handlers must not throw.</summary>
@@ -141,6 +143,28 @@ public sealed class SharedHlsSource : IAsyncDisposable
         }
     }
 
+    public bool TryLocatePlaybackPosition(long startSequence, long elapsedMs, out long sequence, out long offsetMs)
+    {
+        lock (_gate)
+        {
+            sequence = startSequence;
+            offsetMs = Math.Max(0, elapsedMs);
+            if (_timeshiftFailure is not null) return false;
+            try
+            {
+                foreach (var segment in _timeshiftBuffer.ReadWindowFrom(startSequence, includeData: false))
+                {
+                    sequence = segment.Sequence;
+                    var duration = (long)(segment.DurationSeconds * 1000);
+                    if (offsetMs < duration) return true;
+                    offsetMs -= duration;
+                }
+            }
+            catch (LiveTimeshiftOverrunException) { }
+            return false;
+        }
+    }
+
     public LiveTimeshiftSeekResult TryCreateTimeshiftPlaybackUrlBehindLive(TimeSpan behindLive, out Uri? playbackUrl, out long selectedSequence)
     {
         if (behindLive < TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(behindLive));
@@ -155,7 +179,7 @@ public sealed class SharedHlsSource : IAsyncDisposable
                 return LiveTimeshiftSeekResult.Empty;
             selectedSequence = live;
             var remaining = behindLive.TotalSeconds;
-            var entries = _timeshiftBuffer.ReadWindowFrom(oldest);
+            var entries = _timeshiftBuffer.ReadWindowFrom(oldest, includeData: false);
             for (var index = entries.Count - 1; index >= 0; index--)
             {
                 selectedSequence = entries[index].Sequence;
@@ -537,7 +561,7 @@ public sealed class SharedHlsSource : IAsyncDisposable
                         }
                         else start = _playbackStartSequence;
                         snapshot = start is long selectedStart
-                            ? _timeshiftBuffer.ReadWindowFrom(selectedStart).ToArray()
+                            ? _timeshiftBuffer.ReadWindowFrom(selectedStart, includeData: false).ToArray()
                             : _playbackCache.ToArray();
                         if (cursorId is not null && snapshot.Length > 0)
                             cursorStart = _playbackCursors[cursorId].InitialSequence;
@@ -662,7 +686,8 @@ public sealed class SharedHlsSource : IAsyncDisposable
         BuildPlaybackPlaylistCore(segments, "segment/");
 
     private byte[] BuildCursorPlaybackPlaylist(IReadOnlyList<SharedHlsSegment> segments, string segmentPrefix) =>
-        BuildPlaybackPlaylistCore(segments, segmentPrefix);
+        Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(BuildPlaybackPlaylistCore(segments, segmentPrefix))
+            .Replace("#EXT-X-VERSION:3", "#EXT-X-VERSION:3\n#EXT-X-PLAYLIST-TYPE:EVENT", StringComparison.Ordinal));
 
     private byte[] BuildPlaybackPlaylistCore(IReadOnlyList<SharedHlsSegment> segments, string segmentPrefix)
     {
@@ -771,6 +796,8 @@ public sealed class SharedHlsSource : IAsyncDisposable
             if (line.StartsWith("#EXT-X-DISCONTINUITY-SEQUENCE:", StringComparison.Ordinal))
                 throw new NotSupportedException("This shared HLS relay does not support EXT-X-DISCONTINUITY-SEQUENCE.");
             if (line.StartsWith("#EXT-X-", StringComparison.Ordinal) &&
+                !line.StartsWith("#EXT-X-VERSION:", StringComparison.Ordinal) &&
+                !line.StartsWith("#EXT-X-ALLOW-CACHE:", StringComparison.Ordinal) &&
                 !line.StartsWith("#EXT-X-STREAM-INF:", StringComparison.Ordinal) &&
                 !line.StartsWith("#EXT-X-TARGETDURATION:", StringComparison.Ordinal) &&
                 !line.StartsWith("#EXT-X-MEDIA-SEQUENCE:", StringComparison.Ordinal) &&
@@ -1109,7 +1136,7 @@ public sealed class LiveTimeshiftBuffer : IDisposable
         }
     }
 
-    internal IReadOnlyList<SharedHlsSegment> ReadWindowFrom(long sequence)
+    internal IReadOnlyList<SharedHlsSegment> ReadWindowFrom(long sequence, bool includeData = true)
     {
         lock (_gate)
         {
@@ -1118,7 +1145,7 @@ public sealed class LiveTimeshiftBuffer : IDisposable
             if (first is null || sequence < first.Value) throw new LiveTimeshiftOverrunException();
             return _entries.Where(entry => entry.Sequence >= sequence)
                 .Select(entry => new SharedHlsSegment(entry.Sequence, entry.DurationSeconds,
-                    new Uri("timeshift://segment/" + entry.Sequence), File.ReadAllBytes(entry.Path),
+                    new Uri("timeshift://segment/" + entry.Sequence), includeData ? File.ReadAllBytes(entry.Path) : [],
                     entry.ProgramDateTimeUtc, entry.IsDiscontinuity)).ToArray();
         }
     }

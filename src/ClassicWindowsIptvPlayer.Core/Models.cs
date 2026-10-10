@@ -40,6 +40,7 @@ public sealed class SavedAccount
     public string Name { get; set; } = string.Empty;
     public AccountSettings Settings { get; set; } = new();
     public DateTime? LastPlaylistUpdatedUtc { get; set; }
+    public bool HasLoggedIn { get; set; }
     public bool BackgroundPlaylistRefresh { get; set; }
 
     public string DisplayName
@@ -250,6 +251,13 @@ public sealed class AppState
     // Saved player audio state. 100 is normal volume; LibVLC supports values above 100.
     public int VolumeLevel { get; set; } = 100;
     public bool Muted { get; set; } = false;
+
+    // LibVLC video adjustments. Neutral values leave the decoded picture unchanged.
+    public double VideoBrightness { get; set; } = 1.0;
+    public double VideoContrast { get; set; } = 1.0;
+    public double VideoSaturation { get; set; } = 1.0;
+    public int VideoHue { get; set; }
+    public double VideoGamma { get; set; } = 1.0;
 
     // Optional phone/browser remote. The listener remains off until enabled.
     public bool RemoteControlEnabled { get; set; }

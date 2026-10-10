@@ -129,8 +129,8 @@ internal static class Program
                 ((ListBox)window.FindName("ChannelList")).SelectedIndex = 0;
                 await Task.Delay(150);
                 Check(provider.Requests == requests, "same-account repeated refresh trigger makes no duplicate provider request");
-                Check(((Button)window.FindName("CancelLibraryRefreshButton")).IsEnabled,
-                    "busy background refresh exposes enabled Cancel action");
+                Check(window.FindName("CancelLibraryRefreshButton") is null && window.FindName("RetryLibraryRefreshButton") is null,
+                    "status bar has no Cancel or Retry buttons during refresh");
                 slow.Release.TrySetResult(); await Task.WhenAll(load, duplicate).WaitAsync(TimeSpan.FromSeconds(8));
                 Check(Channels.Any(c => c.Name == "Live new") && store.LoadChannelCache("fixture-a").Any(c => c.Name == "Live new"), "successful background replacement publishes and saves verified catalog");
                 var successful = Updated("fixture-a");
@@ -148,7 +148,8 @@ internal static class Program
                 var failed = provider.Enqueue("Fixture failure", 503); load = Load(true);
                 await failed.Requested.Task.WaitAsync(TimeSpan.FromSeconds(5)); failed.Release.TrySetResult(); await load.WaitAsync(TimeSpan.FromSeconds(8));
                 Retained("Live new", successful);
-                Check(((Button)window.FindName("RetryLibraryRefreshButton")).IsEnabled, "failure exposes enabled Retry action");
+                Check(((TextBlock)window.FindName("LibraryRefreshStatusText")).Text.Contains("failed", StringComparison.OrdinalIgnoreCase),
+                    "failed refresh is reported in the status bar");
                 var omitted = provider.Enqueue(Playlist("partial", movie: false)); load = Load(true);
                 await omitted.Requested.Task.WaitAsync(TimeSpan.FromSeconds(5)); omitted.Release.TrySetResult(); await load.WaitAsync(TimeSpan.FromSeconds(8));
                 Retained("Live new", successful);
@@ -156,10 +157,10 @@ internal static class Program
 
                 var canceled = provider.Enqueue(Playlist("canceled")); load = Load(true);
                 await canceled.Requested.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                var cancel = (Button)window.FindName("CancelLibraryRefreshButton"); cancel.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent, cancel));
+                Call("CancelLibraryLoad_Click", window, new RoutedEventArgs());
                 await load.WaitAsync(TimeSpan.FromSeconds(8)); canceled.Release.TrySetResult(); Retained("Live new", successful);
                 var retry = provider.Enqueue(Playlist("retry"));
-                ((Button)window.FindName("RetryLibraryRefreshButton")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+                Call("RetryLibraryLoad_Click", window, new RoutedEventArgs());
                 await retry.Requested.Task.WaitAsync(TimeSpan.FromSeconds(5)); retry.Release.TrySetResult();
                 await Wait(() => Channels.Any(c => c.Name == "Live retry") && Field("_libraryLoadCts") is null, "Retry did not complete a verified refresh");
                 Check(Updated("fixture-a") >= successful, "Retry succeeds and records successful update");

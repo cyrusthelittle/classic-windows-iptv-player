@@ -41,6 +41,7 @@ public partial class LoginWindow : Window
     {
         CaptureFields();
         var requestedUpdate = UpdatePlaylistCheck.IsChecked == true;
+        _session.Selected.HasLoggedIn = true;
         if (!CommitDrafts()) return;
 
         var selected = _session.Selected;

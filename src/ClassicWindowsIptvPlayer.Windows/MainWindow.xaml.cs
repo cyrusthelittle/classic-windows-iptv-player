@@ -277,6 +277,8 @@ public partial class MainWindow : Window
     private TimeSpan _livePausedDuration;
     private DateTime _lastEpgUiUpdateUtc = DateTime.MinValue;
     private TimeSpan _liveBehind = TimeSpan.Zero;
+    // Activated by an explicit pause/seek; resume at normal speed retains this state.
+    private bool _liveDelayWasUserRequested;
     private long? _pendingResumeTimeMs;
     private string _pendingResumeChannelId = string.Empty;
     private int _pendingResumeSeekAttempts;
@@ -334,6 +336,7 @@ public partial class MainWindow : Window
         if (!updateHealthProbe) _store.Save(_state);
 
         InitializeComponent();
+        UpdateTopmostButton();
         ChannelList.ContextMenu = new System.Windows.Controls.ContextMenu();
         _loadingTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
         _loadingTimer.Tick += (_, _) =>
@@ -516,10 +519,8 @@ public partial class MainWindow : Window
         };
 
         _tuner = new ChannelTuner(_libVlc) { MaxAttempts = GetReconnectAttempts(), TimeshiftEnabled = _state.TimeshiftEnabled };
-        TimeshiftMenu.IsChecked = _state.TimeshiftEnabled;
         if (_state.TimeshiftSeconds is not (30 or 60 or 90 or 120)) _state.TimeshiftSeconds = 30;
         _tuner.SetTimeshiftRetention(_state.TimeshiftSeconds);
-        UpdateTimeshiftSecondsUi();
         _tuner.PlayerAttached += OnTunerPlayerAttached;
         _tuner.ActiveMediaChanged += OnTunerActiveMediaChanged;
         _tuner.PlayerDetaching += OnTunerPlayerDetaching;
@@ -606,7 +607,11 @@ public partial class MainWindow : Window
         ToolTipService.SetShowOnDisabled(RecordButton, true);
         StopRecordingButton.Visibility = hasActiveRecording ? Visibility.Visible : Visibility.Collapsed;
         StopRecordingButton.IsEnabled = !_isShuttingDown && hasActiveRecording;
+        UpdateLiveDelayUi();
     }
+
+    private bool IsLiveRecording => !string.IsNullOrEmpty(_activeRecordingId) &&
+        _recordingService?.Find(_activeRecordingId)?.IsLive == true;
 
     private void UpdateRecentRecordingButton()
     {
@@ -819,6 +824,7 @@ public partial class MainWindow : Window
                 "; handleCreated=" + _videoView.IsHandleCreated + "; channel=" + request.ChannelName);
 
             AttachUiEventHandlers(player);
+            ApplyVideoAdjustments();
             ApplySavedAudioState();
         });
     }
@@ -914,6 +920,10 @@ public partial class MainWindow : Window
             switch (snapshot.Status)
             {
                 case TunerStatus.Tuning:
+                    if (snapshot.Request?.IsLive == true)
+                    {
+                        ClearLiveDelay();
+                    }
                     StatusText.Text = snapshot.Attempt <= 1
                         ? "Opening: " + snapshot.Request?.ChannelName
                         : $"Reconnecting ({snapshot.Attempt}/{snapshot.MaxAttempts}): {snapshot.Request?.ChannelName}";
@@ -1392,7 +1402,9 @@ public partial class MainWindow : Window
         try
         {
             var result = await Task.Run(
-                () => viewMode is 2 or 3
+                () => !string.IsNullOrWhiteSpace(search) && seriesEpisodes is null
+                    ? BuildSuperSearchResult(channels, searchIndex, search, kind, groupOrganization, cts.Token)
+                    : viewMode is 2 or 3
                     ? BuildHistoryFilterResult(library, channels, search, kind, viewMode == 3, cts.Token)
                     : seriesEpisodes is not null
                     ? BuildSeriesFilterResult(seriesEpisodes, search, activeSeason, cts.Token)
@@ -1403,7 +1415,30 @@ public partial class MainWindow : Window
 
             _filteredChannels = result.FilteredChannels;
             _visibleChannels = result.VisibleChannels;
-            if (result.Folders is not null)
+            _searchRows = null;
+            if (result.SearchSections is not null)
+            {
+                var rows = new List<SuperSearchRow>();
+                foreach (var section in result.SearchSections)
+                {
+                    rows.Add(new SuperSearchRow(section.Kind, null, null, true));
+                    rows.AddRange(section.Folders.Select(folder => new SuperSearchRow(section.Kind, folder, null, false)));
+                    rows.AddRange(section.Channels.Select(channel => new SuperSearchRow(section.Kind, null, channel, false)));
+                }
+                _searchRows = rows;
+                _visibleEntries = new LazyList<ChannelListEntry>(rows.Count, index =>
+                {
+                    var row = rows[index];
+                    if (row.IsHeading) return ChannelListEntry.ForSearchHeading(row.Kind, result.SearchSections
+                        .First(section => section.Kind == row.Kind).Channels.Count);
+                    if (row.Folder is { } folder) return ChannelListEntry.ForFolder(folder.Name, folder.Count, mediaKind: row.Kind);
+                    var channel = row.Channel!;
+                    return ChannelListEntry.ForChannel(channel,
+                        library.ViewingProgress is not null && library.ViewingProgress.TryGetValue(ItemIdentity.For(channel), out var progress)
+                            ? progress : null);
+                });
+            }
+            else if (result.Folders is not null)
             {
                 _visibleEntries = result.Folders
                     .Select(folder => ChannelListEntry.ForFolder(folder.Name, folder.Count, folder.FavoriteFolderId))
@@ -1419,12 +1454,12 @@ public partial class MainWindow : Window
             }
 
             FolderBackButton.Visibility = (result.ShowBackButton || seriesEpisodes is not null) ? Visibility.Visible : Visibility.Collapsed;
-            NewFavoriteFolderButton.Visibility = viewMode == 1 ? Visibility.Visible : Visibility.Collapsed;
+            NewFavoriteFolderButton.Visibility = result.SearchSections is null && viewMode == 1 ? Visibility.Visible : Visibility.Collapsed;
             CountText.Text = result.CountText;
             UpdateBreadcrumb();
             UpdateFilterScope();
-            VodSortPicker.Visibility = _mediaKindMode is 2 or 3 && seriesEpisodes is null ? Visibility.Visible : Visibility.Collapsed;
-            VodDetailsButton.Visibility = _mediaKindMode is 2 or 3 ? Visibility.Visible : Visibility.Collapsed;
+            VodSortPicker.Visibility = result.SearchSections is null && _mediaKindMode is 2 or 3 && seriesEpisodes is null ? Visibility.Visible : Visibility.Collapsed;
+            VodDetailsButton.Visibility = result.SearchSections is not null || _mediaKindMode is 2 or 3 ? Visibility.Visible : Visibility.Collapsed;
             var selectedBeforeRefresh = _playbackState.SelectedChannel;
             var scope = $"{_state.SelectedAccountId}|{_mediaKindMode}|{_viewMode}|{_browseMode}|{_activeFolder}|{_activeFavoriteFolderId}|{_activeLetter}|{_activeSeriesId}|{_activeSeason}|{SearchBox.Text}|{_vodSort}";
             var priorOffset = CatalogPositionRetention.ShouldRestoreScroll(_displayedCatalogScope, scope, _pendingLibraryRestore is not null)
@@ -1711,6 +1746,7 @@ public partial class MainWindow : Window
     private sealed class FilterResult
     {
         public List<FolderResult>? Folders { get; init; }
+        public List<SuperSearchSection>? SearchSections { get; init; }
         public List<Channel> FilteredChannels { get; init; } = [];
         public List<Channel> VisibleChannels { get; init; } = [];
         public bool ShowBackButton { get; init; }
@@ -1787,8 +1823,12 @@ public partial class MainWindow : Window
         var view = _viewMode switch { 1 => "Favorites", 2 => "Recent", 3 => "Continue", _ => "All" };
         var browse = _browseMode switch { 0 => "Folders", 1 => "A-Z", _ => "Items" };
         var location = _activeSeriesName ?? _activeFolder ?? _activeLetter ?? (_activeFavoriteFolderId is null ? null : _activeFavoriteFolderId.Length == 0 ? "Unfiled" : _state.FavoriteFolders.FirstOrDefault(f => f.Id == _activeFavoriteFolderId)?.Name);
-        FilterScopeText.Text = $"{kind} · {view} · {browse}" + (location is null ? "" : $" · {location}");
-        SearchScopeText.Text = "Searching: " + FilterScopeText.Text;
+        FilterScopeText.Text = !string.IsNullOrWhiteSpace(SearchBox.Text) && _activeSeriesEpisodes is null
+            ? $"Search results · {kind} first · all media"
+            : $"{kind} · {view} · {browse}" + (location is null ? "" : $" · {location}");
+        SearchScopeText.Text = !string.IsNullOrWhiteSpace(SearchBox.Text) && _activeSeriesEpisodes is null
+            ? "Searching all media · selected type first · folders before items"
+            : "Searching: " + FilterScopeText.Text;
         ResetFiltersButton.IsEnabled = LibraryNavigationPolicy.CanReset(_viewMode, _browseMode,
             _activeFolder is not null || _activeLetter is not null || _activeFavoriteFolderId is not null || _activeSeriesId is not null, SearchBox.Text);
     }
@@ -1994,6 +2034,11 @@ public partial class MainWindow : Window
     // folder or series name can never crowd the Back button off to the side.
     private void UpdateBreadcrumb()
     {
+        if (!string.IsNullOrWhiteSpace(SearchBox.Text) && _activeSeriesEpisodes is null)
+        {
+            BreadcrumbPanel.Visibility = Visibility.Collapsed;
+            return;
+        }
         var segments = new List<(string Label, Action? OnClick)>();
 
         if (_activeFolder is not null || _activeFavoriteFolderId is not null || _activeLetter is not null || _activeSeriesId is not null)
@@ -2073,7 +2118,12 @@ public partial class MainWindow : Window
             var isCurrent = onClick is null;
             if (onClick is not null)
             {
-                var segment = new System.Windows.Controls.Button { Content = label, Padding = new Thickness(4, 1, 4, 1), ToolTip = "Go to " + label };
+                var segment = new System.Windows.Controls.Button
+                {
+                    Content = label,
+                    ToolTip = "Go to " + label,
+                    Style = (Style)FindResource("BreadcrumbButtonStyle")
+                };
                 segment.SetResourceReference(System.Windows.Controls.Button.ForegroundProperty, "Text1Brush");
                 segment.Click += (_, _) => onClick();
                 BreadcrumbPanel.Children.Add(segment);
@@ -2207,10 +2257,9 @@ public partial class MainWindow : Window
         }
         else if (seriesId is not null)
         {
-            var index = _visibleChannels.FindIndex(channel =>
+            match = _visibleEntries.FirstOrDefault(entry => entry.Channel is { } channel &&
                 SeriesPlaceholder.TryGetSeriesId(channel, out var id) &&
                 string.Equals(id, seriesId, StringComparison.OrdinalIgnoreCase));
-            if (index >= 0) match = _visibleEntries[index];
         }
 
         if (match is null) return;
@@ -2234,15 +2283,31 @@ public partial class MainWindow : Window
         {
             // A freshly opened channel list may not have a highlighted item yet.
             // Make Select useful immediately by targeting the first visible entry.
-            if (_visibleEntries.Count == 0) return;
-            ChannelList.SelectedIndex = 0;
-            entry = _visibleEntries[0];
+            var first = _visibleEntries.FirstOrDefault(candidate => !candidate.IsSearchHeading);
+            if (first is null) return;
+            entry = first;
+            ChannelList.SelectedItem = entry;
             ChannelList.ScrollIntoView(entry);
         }
 
+        if (entry.IsSearchHeading) return;
+
         if (entry.IsFolder)
         {
-            if (entry.FavoriteFolderId is not null)
+            if (entry.FolderMediaKind is { } folderKind)
+            {
+                SetMediaKindMode(folderKind switch { MediaKind.Live => 1, MediaKind.Movie => 2, _ => 3 });
+                _pendingLibraryRestore = null;
+                _viewMode = 0;
+                _browseMode = 0;
+                _activeFolder = null;
+                _activeFavoriteFolderId = null;
+                _activeLetter = null;
+                UpdateViewModeButtons();
+                UpdateSearchScopeButtons();
+                EnterFolder(entry.FolderName);
+            }
+            else if (entry.FavoriteFolderId is not null)
             {
                 _activeFavoriteFolderId = entry.FavoriteFolderId;
                 _activeLetter = null;
@@ -2253,7 +2318,22 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (entry.Channel is not null) ActivateVodOrLive(entry.Channel);
+        if (entry.Channel is { } selectedChannel)
+        {
+            if (_searchRows is not null && SeriesPlaceholder.TryGetSeriesId(selectedChannel, out _))
+            {
+                SetMediaKindMode(3);
+                _pendingLibraryRestore = null;
+                _viewMode = 0;
+                _browseMode = 2;
+                _activeFolder = null;
+                _activeFavoriteFolderId = null;
+                _activeLetter = null;
+                UpdateViewModeButtons();
+                UpdateSearchScopeButtons();
+            }
+            ActivateVodOrLive(selectedChannel);
+        }
     }
 
     private void ActivateVodOrLive(Channel channel)
@@ -2312,7 +2392,7 @@ public partial class MainWindow : Window
             ActivateVodOrLive(next);
     }
 
-    private void EnterFolder(string folderName)
+    private async void EnterFolder(string folderName)
     {
         if (_browseMode == 0)
         {
@@ -2323,8 +2403,8 @@ public partial class MainWindow : Window
             _activeLetter = folderName;
         }
         SearchBox.Clear();
-        ApplyFilters();
-        if (_visibleEntries.Count > 0)
+        await ApplyFiltersAsync();
+        if (_searchRows is null && _visibleEntries.Count > 0 && string.IsNullOrEmpty(SearchBox.Text))
         {
             ChannelList.SelectedIndex = 0;
             ChannelList.ScrollIntoView(ChannelList.SelectedItem);
@@ -2375,9 +2455,40 @@ public partial class MainWindow : Window
         if (channel is null) return;
 
         var selectedKey = ItemIdentity.For(channel);
-        var index = _visibleChannels.FindIndex(visible =>
-            string.Equals(ItemIdentity.For(visible), selectedKey, StringComparison.OrdinalIgnoreCase));
-        var match = index >= 0 ? _visibleEntries[index] : null;
+        static int FindChannelIndex(IReadOnlyList<Channel> channels, Channel target, string identity)
+        {
+            var index = -1;
+            for (var i = 0; i < channels.Count; i++)
+                if (ReferenceEquals(channels[i], target)) { index = i; break; }
+            if (index >= 0) return index;
+
+            index = -1;
+            for (var i = 0; i < channels.Count; i++)
+                if (string.Equals(channels[i].Id, target.Id, StringComparison.OrdinalIgnoreCase)) { index = i; break; }
+            if (index >= 0) return index;
+
+            for (var i = 0; i < channels.Count; i++)
+                if (string.Equals(ItemIdentity.For(channels[i]), identity, StringComparison.OrdinalIgnoreCase)) return i;
+            return -1;
+        }
+
+        var index = FindChannelIndex(_visibleChannels, channel, selectedKey);
+        var entryIndex = index;
+        if (_searchRows is not null && entryIndex >= 0)
+        {
+            entryIndex = FindChannelIndex(_searchRows.Where(row => row.Channel is not null)
+                .Select(row => row.Channel!).ToList(), channel, selectedKey);
+            if (entryIndex >= 0)
+            {
+                var channelRowIndex = 0;
+                for (var i = 0; i < _searchRows.Count; i++)
+                {
+                    if (_searchRows[i].Channel is null) continue;
+                    if (channelRowIndex++ == entryIndex) { entryIndex = i; break; }
+                }
+            }
+        }
+        var match = entryIndex >= 0 ? _visibleEntries[entryIndex] : null;
         if (match is not null)
         {
             _suppressChannelSelectionChange = true;
@@ -2712,6 +2823,7 @@ public partial class MainWindow : Window
                 FinishLivePauseTracking();
                 PlayPauseButton.Content = IconFactory.Create(IconFactory.Pause);
                 StatusText.Text = "Resumed from the paused position.";
+                UpdatePlaybackPosition();
                 UpdateStreamInfo();
             }
             catch (OperationCanceledException) { }
@@ -2788,8 +2900,10 @@ public partial class MainWindow : Window
     {
         if (_catchupPlayback is not null) return;
         if (_currentChannel?.MediaKind != MediaKind.Live) return;
+        _liveDelayWasUserRequested = true;
         _livePausedDuration = TimeSpan.Zero;
         _livePauseStartedUtc = DateTime.UtcNow;
+        UpdatePlaybackPosition();
         UpdateLiveDelayUi();
     }
 
@@ -2811,6 +2925,7 @@ public partial class MainWindow : Window
         _livePauseStartedUtc = null;
         _livePausedDuration = TimeSpan.Zero;
         _liveBehind = TimeSpan.Zero;
+        _liveDelayWasUserRequested = false;
         UpdateLiveDelayUi();
     }
 
@@ -2837,33 +2952,34 @@ public partial class MainWindow : Window
 
     private bool IsLivePaused => _catchupPlayback is null && _currentChannel?.MediaKind == MediaKind.Live && _pausedPlayback is not null;
 
+    private bool HasUserDelayedLivePlayback => _catchupPlayback is null &&
+        _currentChannel?.MediaKind == MediaKind.Live && (IsLivePaused || _liveDelayWasUserRequested);
+
+    private bool ShowLivePlaybackControls => HasUserDelayedLivePlayback && !IsLiveRecording;
+
     private string FormatLivePosition(TimeSpan behind, TimeSpan available)
     {
-        var position = FormatLiveTimeshiftPosition(behind, available);
-        return IsLivePaused ? "Paused " + FormatTime((long)GetLivePauseElapsed().TotalMilliseconds) + " · " + position : position;
+        var delay = "Behind live " + FormatLiveDelay(behind);
+        return IsLivePaused ? "Paused " + FormatTime((long)GetLivePauseElapsed().TotalMilliseconds) + " · " + delay : delay;
     }
 
     private void UpdateLiveDelayUi()
     {
         var behind = GetCurrentLiveBehind();
-        var show = _catchupPlayback is not null || behind >= TimeSpan.FromSeconds(1);
-        var pausedLive = IsLivePaused;
-        var text = _catchupPlayback is not null ? "Watching archive" : show ? "Behind live " + FormatLiveDelay(behind) : string.Empty;
-        LiveTimeshiftWindow? timeshiftWindow = null;
-        var hasTimeshift = _currentChannel?.MediaKind == MediaKind.Live &&
-            _tuner?.TryInspectLiveTimeshift(out timeshiftWindow, out _) == true;
-        var canRewind = hasTimeshift && timeshiftWindow!.Duration >= GetCurrentLiveBehind() + TimeSpan.FromSeconds(_state.TimeshiftSeconds) &&
-            _mediaPlayer?.State == VLCState.Playing;
+        var show = _catchupPlayback is not null || HasUserDelayedLivePlayback;
+        var text = _catchupPlayback is not null ? "Watching archive" : HasUserDelayedLivePlayback ? FormatLivePosition(behind, TimeSpan.Zero) : string.Empty;
+        var showLiveControls = ShowLivePlaybackControls;
 
         LiveDelayText.Text = text;
         LiveDelayText.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
-        GoLiveButton.Visibility = pausedLive ? Visibility.Visible : Visibility.Collapsed;
-        GoLiveButton.IsEnabled = pausedLive;
-        GoLiveMenuItem.IsEnabled = show;
-        VideoGoLiveMenuItem.IsEnabled = show;
-        RewindLiveButton.Visibility = hasTimeshift ? Visibility.Visible : Visibility.Collapsed;
-        RewindLiveButton.IsEnabled = canRewind;
-        RewindLiveMenuItem.IsEnabled = canRewind;
+        GoLiveButton.Visibility = showLiveControls ? Visibility.Visible : Visibility.Collapsed;
+        GoLiveButton.IsEnabled = showLiveControls;
+        if (_catchupPlayback is null && _currentChannel?.MediaKind == MediaKind.Live)
+        {
+            SeekSlider.Visibility = showLiveControls ? Visibility.Visible : Visibility.Collapsed;
+            if (!showLiveControls) SeekSlider.IsEnabled = false;
+            if (!HasUserDelayedLivePlayback && !IsLiveRecording) TimeText.Visibility = Visibility.Collapsed;
+        }
     }
 
     private static string FormatLiveDelay(TimeSpan delay)
@@ -3157,49 +3273,27 @@ public partial class MainWindow : Window
         }
     }
 
-    private void TimeshiftToggle_Click(object sender, RoutedEventArgs e)
-    {
-        _state.TimeshiftEnabled = TimeshiftMenu.IsChecked;
-        _store.Save(_state);
-        if (_tuner is not null) _tuner.TimeshiftEnabled = _state.TimeshiftEnabled;
-        if (_currentChannel?.MediaKind == MediaKind.Live) RestartStream_Click(sender, e);
-        UpdatePlaybackPosition();
-    }
-
-    private void TimeshiftSeconds_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is not WpfMenuItem item || !int.TryParse(item.Tag?.ToString(), out var seconds) || seconds is not (30 or 60 or 90 or 120)) return;
-        _state.TimeshiftSeconds = seconds;
-        _store.Save(_state);
-        _tuner?.SetTimeshiftRetention(seconds);
-        UpdateTimeshiftSecondsUi();
-        UpdateLiveDelayUi();
-    }
-
-    private void UpdateTimeshiftSecondsUi()
-    {
-        foreach (var item in TimeshiftSecondsMenu.Items.OfType<WpfMenuItem>())
-            item.IsChecked = item.Tag?.ToString() == _state.TimeshiftSeconds.ToString();
-        RewindLiveMenuItem.Header = "Rewind " + _state.TimeshiftSeconds + " seconds";
-        RewindLiveButton.Content = "−" + _state.TimeshiftSeconds + "s";
-        RewindLiveButton.ToolTip = "Rewind the current stream by " + _state.TimeshiftSeconds + " seconds";
-    }
-
     private void UpdatePlaybackPosition()
     {
         if (_mediaPlayer is null || _isSeeking) return;
         var isLive = _currentChannel?.MediaKind == MediaKind.Live && _catchupPlayback is null;
-        SeekSlider.Visibility = isLive && !_state.TimeshiftEnabled && _livePauseStartedUtc is null && _livePausedDuration == TimeSpan.Zero ? Visibility.Collapsed : Visibility.Visible;
+        SeekSlider.Visibility = isLive ? Visibility.Collapsed : Visibility.Visible;
         ApplyPreferredTracks(_mediaPlayer);
         SavePlaybackProgress(force: false);
         if (TryGetLiveTimeshiftWindow(out var liveWindow) && liveWindow!.Duration > TimeSpan.Zero)
         {
-            SeekSlider.IsEnabled = _mediaPlayer.State is VLCState.Playing or VLCState.Paused;
+            var liveBehind = GetCurrentLiveBehind();
+            SeekSlider.Visibility = ShowLivePlaybackControls
+                ? Visibility.Visible : Visibility.Collapsed;
+            SeekSlider.IsEnabled = ShowLivePlaybackControls && (_mediaPlayer.State is VLCState.Playing or VLCState.Paused);
             _updatingSeekSlider = true;
-            try { SeekSlider.Value = LiveTimeshiftSliderValue(GetCurrentLiveBehind(), liveWindow.Duration); }
+            try { SeekSlider.Value = LiveTimeshiftSliderValue(liveBehind, liveWindow.Duration); }
             finally { _updatingSeekSlider = false; }
-            TimeText.Text = FormatLivePosition(GetCurrentLiveBehind(), liveWindow.Duration);
-            TimeText.Visibility = Visibility.Visible;
+            TimeText.Text = IsLiveRecording
+                ? IsLivePaused ? "Recording (paused)" : "Recording live TV"
+                : FormatLivePosition(liveBehind, liveWindow.Duration);
+            TimeText.Visibility = HasUserDelayedLivePlayback || IsLiveRecording
+                ? Visibility.Visible : Visibility.Collapsed;
             return;
         }
         var length = _mediaPlayer.Length;
@@ -3214,17 +3308,21 @@ public partial class MainWindow : Window
         }
         else
         {
+            if (isLive)
+                SeekSlider.Visibility = ShowLivePlaybackControls
+                    ? Visibility.Visible : Visibility.Collapsed;
             SeekSlider.IsEnabled = false;
             _updatingSeekSlider = true;
             try { SeekSlider.Value = 0; }
             finally { _updatingSeekSlider = false; }
-            TimeText.Text = IsLivePaused
-                ? "Paused " + FormatTime((long)GetLivePauseElapsed().TotalMilliseconds) + " · timeshift unavailable"
-                : isLive && _state.TimeshiftEnabled
-                ? "Timeshift unavailable for this stream"
-                : _mediaPlayer.IsPlaying ? "Live" : "00:00 / 00:00";
+            TimeText.Text = IsLiveRecording
+                ? IsLivePaused ? "Recording (paused)" : "Recording live TV"
+                : HasUserDelayedLivePlayback
+                    ? FormatLivePosition(GetCurrentLiveBehind(), TimeSpan.Zero)
+                    : _mediaPlayer.IsPlaying ? "Live" : "00:00 / 00:00";
         }
-        TimeText.Visibility = Visibility.Visible;
+        TimeText.Visibility = !isLive || HasUserDelayedLivePlayback || IsLiveRecording
+            ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void SavePlaybackProgress(bool force)
@@ -3251,6 +3349,7 @@ public partial class MainWindow : Window
 
     private void SeekSlider_PreviewMouseDown(object sender, MouseButtonEventArgs e)
     {
+        if (IsLiveRecording) { e.Handled = true; return; }
         _isSeekingLiveTimeshift = TryGetLiveTimeshiftWindow(out var window) && window!.Duration > TimeSpan.Zero;
         _seekWindowDuration = _isSeekingLiveTimeshift ? window!.Duration : null;
         _isSeeking = true;
@@ -3258,6 +3357,7 @@ public partial class MainWindow : Window
 
     private async void SeekSlider_PreviewMouseUp(object sender, MouseButtonEventArgs e)
     {
+        if (IsLiveRecording) { _isSeeking = false; return; }
         _isSeeking = false;
         if (_isSeekingLiveTimeshift)
         {
@@ -3271,7 +3371,7 @@ public partial class MainWindow : Window
 
     private void SeekSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
-        if (_updatingSeekSlider || _mediaPlayer is null) return;
+        if (IsLiveRecording || _updatingSeekSlider || _mediaPlayer is null) return;
         if (TryGetLiveTimeshiftWindow(out var liveWindow) && liveWindow!.Duration > TimeSpan.Zero)
         {
             var previewDuration = _seekWindowDuration ?? liveWindow.Duration;
@@ -3305,7 +3405,7 @@ public partial class MainWindow : Window
 
     private async Task CommitLiveTimeshiftSliderAsync()
     {
-        if (_tuner is null || !TryGetLiveTimeshiftWindow(out var window) || window!.Duration <= TimeSpan.Zero) return;
+        if (IsLiveRecording || _tuner is null || !TryGetLiveTimeshiftWindow(out var window) || window!.Duration <= TimeSpan.Zero) return;
         if (_committingLiveSeek) return;
         _committingLiveSeek = true;
         try
@@ -3324,6 +3424,7 @@ public partial class MainWindow : Window
                 ClearPauseResumeState();
                 _livePauseStartedUtc = null;
                 _liveBehind = targetBehindLive < TimeSpan.FromSeconds(1) ? TimeSpan.Zero : targetBehindLive;
+                _liveDelayWasUserRequested = targetBehindLive >= TimeSpan.FromSeconds(1);
                 if (wasPaused && targetBehindLive >= TimeSpan.FromSeconds(1))
                 {
                     PauseCurrentPlayback();
@@ -4336,13 +4437,7 @@ public partial class MainWindow : Window
     private void StartUpdateHelper(StagedUpdate staged, GitHubReleaseInfo release)
     {
         var runner = Path.Combine(staged.Directory, "runner-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(runner);
-        foreach (var name in new[] { AuthenticatedUpdate.HelperExe, "ClassicWindowsIptvPlayer.Updater.dll", "ClassicWindowsIptvPlayer.Updater.deps.json", "ClassicWindowsIptvPlayer.Updater.runtimeconfig.json", "ClassicWindowsIptvPlayer.Core.dll" })
-        {
-            var source = Path.Combine(AppContext.BaseDirectory, name);
-            if (!File.Exists(source) && name == AuthenticatedUpdate.HelperExe) throw new IOException("This installation does not include the updater helper. Open the release on GitHub and install the next build manually first.");
-            if (File.Exists(source)) File.Copy(source, Path.Combine(runner, name));
-        }
+        UpdaterRunner.CopyFiles(AppContext.BaseDirectory, runner);
         var job = new UpdateJob(staged.Directory, Path.GetFullPath(AppContext.BaseDirectory), AppDataPaths.Root, Environment.ProcessId, _updateService.CurrentVersion.ToString(), release.DisplayVersion);
         var jobPath = Path.Combine(staged.Directory, "update-job.json");
         File.WriteAllBytes(jobPath, System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(job));
@@ -4695,34 +4790,9 @@ public partial class MainWindow : Window
         else StatusText.Text = "Select a channel and press Play first.";
     }
 
-    private async void RewindLive_Click(object sender, RoutedEventArgs e)
-    {
-        if (_tuner is null || _currentChannel?.MediaKind != MediaKind.Live)
-        {
-            StatusText.Text = "Rewind is available only for a supported live stream.";
-            return;
-        }
-
-        RewindLiveButton.IsEnabled = false;
-        var targetBehindLive = GetCurrentLiveBehind() + TimeSpan.FromSeconds(_state.TimeshiftSeconds);
-        var result = await _tuner.SeekLiveTimeshiftAsync(targetBehindLive);
-        if (result.Success)
-        {
-            ClearPauseResumeState();
-            _livePauseStartedUtc = null;
-            _liveBehind = targetBehindLive;
-            UpdateLiveDelayUi();
-            StatusText.Text = "Rewound to approximately " + FormatLiveDelay(targetBehindLive) + " behind live: " + _currentChannel.Name;
-        }
-        else
-        {
-            StatusText.Text = result.FailureReason ?? "The requested timeshift position is unavailable.";
-        }
-        UpdateLiveDelayUi();
-    }
-
     private async void GoLive_Click(object sender, RoutedEventArgs e)
     {
+        if (IsLiveRecording) return;
         if (_currentChannel?.MediaKind != MediaKind.Live)
         {
             StatusText.Text = "Go Live is only available for live streams.";
@@ -4748,6 +4818,7 @@ public partial class MainWindow : Window
             {
                 StatusText.Text = result.FailureReason ?? "Could not return to the live edge.";
             }
+            UpdatePlaybackPosition();
             UpdateLiveDelayUi();
             return;
         }
@@ -4929,7 +5000,7 @@ public partial class MainWindow : Window
                 menu.Items.Add(delete);
             }
         }
-        else if (entry.IsFolder && _viewMode != 1 && _browseMode == 0)
+        else if (entry.IsFolder && _searchRows is null && _viewMode != 1 && _browseMode == 0)
         {
             var sourceGroup = _sourceChannels.Select(c => c.Group).Distinct(StringComparer.OrdinalIgnoreCase)
                 .FirstOrDefault(name => string.Equals(DisplayGroupName(name),
@@ -5250,8 +5321,12 @@ public partial class MainWindow : Window
     {
         if (_visibleEntries.Count == 0) return;
         var index = ChannelList.SelectedIndex;
-        if (index < 0) index = delta > 0 ? -1 : 1;
-        index = Math.Clamp(index + delta, 0, _visibleEntries.Count - 1);
+        if (index < 0) index = delta > 0 ? -1 : _visibleEntries.Count;
+        do
+        {
+            index = Math.Clamp(index + delta, 0, _visibleEntries.Count - 1);
+        } while (_visibleEntries[index].IsSearchHeading && index > 0 && index < _visibleEntries.Count - 1);
+        if (_visibleEntries[index].IsSearchHeading) return;
         ChannelList.SelectedIndex = index;
         ChannelList.ScrollIntoView(ChannelList.SelectedItem);
     }
@@ -5356,20 +5431,34 @@ public partial class MainWindow : Window
         public string Logo { get; private init; } = string.Empty;
         public Viewbox Icon { get; private init; } = IconFactory.Create(IconFactory.Tv, 18);
         public bool IsFolder { get; private init; }
+        public bool IsSearchHeading { get; private init; }
+        public MediaKind? FolderMediaKind { get; private init; }
         public string FolderName { get; private init; } = string.Empty;
         public string? FavoriteFolderId { get; private init; }
         public Channel? Channel { get; private init; }
 
-        public static ChannelListEntry ForFolder(string folderName, int itemCount, string? favoriteFolderId = null)
+        public static ChannelListEntry ForFolder(string folderName, int itemCount, string? favoriteFolderId = null, MediaKind? mediaKind = null)
         {
             return new ChannelListEntry
             {
                 Name = folderName,
-                Group = $"{itemCount:N0} channels - double-click to open",
+                Group = $"{itemCount:N0} items · double-click to open",
                 Icon = IconFactory.Create(IconFactory.Folder, 18),
                 IsFolder = true,
                 FolderName = folderName,
-                FavoriteFolderId = favoriteFolderId
+                FavoriteFolderId = favoriteFolderId,
+                FolderMediaKind = mediaKind
+            };
+        }
+
+        public static ChannelListEntry ForSearchHeading(MediaKind kind, int itemCount)
+        {
+            return new ChannelListEntry
+            {
+                Name = kind switch { MediaKind.Live => "Live TV", MediaKind.Movie => "Movies", _ => "Series" },
+                Group = $"{itemCount:N0} matching items · folders first",
+                IsSearchHeading = true,
+                Icon = IconFactory.Create(kind == MediaKind.Live ? IconFactory.Tv : IconFactory.Cinema, 18)
             };
         }
 

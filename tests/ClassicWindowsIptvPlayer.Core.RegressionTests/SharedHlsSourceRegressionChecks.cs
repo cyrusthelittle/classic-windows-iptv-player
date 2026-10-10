@@ -12,6 +12,12 @@ internal static class SharedHlsSourceRegressionChecks
     public static async Task<int> RunAsync()
     {
         var failures = 0;
+        Check("standard HLS version and legacy cache directives do not disable timeshift", () =>
+        {
+            var uris = SharedHlsSource.ResolveMediaSegmentUris(new Uri("https://example.test/live.m3u8"),
+                "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-ALLOW-CACHE:NO\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:2,\nsegment-00000001.ts\n");
+            Equal(1, uris.Count);
+        });
         Check("relative media segment URIs resolve from playlist", () =>
         {
             var uris = SharedHlsSource.ResolveMediaSegmentUris(new Uri("https://example.test/live/index.m3u8"),

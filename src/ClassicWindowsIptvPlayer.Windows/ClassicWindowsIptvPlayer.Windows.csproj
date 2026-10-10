@@ -13,6 +13,7 @@
     <AssemblyVersion>0.8.3.0</AssemblyVersion>
     <PlatformTarget>x64</PlatformTarget>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishSingleFile>false</PublishSingleFile>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <ApplicationIcon>Assets\ClassicWindowsIptvPlayer.ico</ApplicationIcon>
     <!-- App is x64-only; skip bundling the x86/arm64 native LibVLC binaries (~180 MB) -->
@@ -41,5 +42,7 @@
     <Copy SourceFiles="@(UpdaterFiles)" DestinationFolder="$(TargetDir)" />
   </Target>
   <Target Name="PublishUpdaterHelper" AfterTargets="Publish">
-    <MSBuild Projects="../ClassicWindowsIptvPlayer.Updater/ClassicWindowsIptvPlayer.Updater.csproj" Targets="Publish" Properties="Configuration=$(Configuration);PublishDir=$(PublishDir);SelfContained=$(SelfContained);RuntimeIdentifier=win-x64;PublishSingleFile=true;IncludeNativeLibrariesForSelfExtract=true" />
+    <!-- Both apps use the same runtime files in this publish directory. -->
+    <Error Condition="'$(PublishSingleFile)' == 'true'" Text="Publish the player with PublishSingleFile=false so the player and updater share their runtime files." />
+    <MSBuild Projects="../ClassicWindowsIptvPlayer.Updater/ClassicWindowsIptvPlayer.Updater.csproj" Targets="Publish" Properties="Configuration=$(Configuration);PublishDir=$(PublishDir);SelfContained=$(SelfContained);RuntimeIdentifier=win-x64;PublishSingleFile=false" />
   </Target></Project>
