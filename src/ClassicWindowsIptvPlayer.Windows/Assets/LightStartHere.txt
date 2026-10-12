@@ -1,0 +1,30 @@
+CLASSIC WINDOWS IPTV PLAYER - LIGHT EDITION
+
+Before first use, install these two requirements on Windows 10 or 11 (64-bit):
+
+1. .NET 10 Desktop Runtime for Windows, x64
+   Official Microsoft download:
+   https://dotnet.microsoft.com/en-us/download/dotnet/10.0
+   On that page, find ".NET Desktop Runtime" and choose the Windows x64 installer.
+   Install the latest stable 10.0 release.
+
+2. VLC media player 3, 64-bit
+   Official VideoLAN download:
+   https://www.videolan.org/vlc/download-windows.html
+   Choose "Installer for 64bit version" and run the installer.
+
+If both are already installed, you can start the player immediately.
+
+START THE PLAYER
+
+Extract the entire Light package and keep its files together.
+Open "Classic Windows IPTV Player.exe".
+
+If the launcher says .NET is missing, install the Desktop Runtime from step 1
+and reopen the player. The launcher message includes a download link.
+
+If the player says VLC is needed, choose "Download VLC", install the 64-bit
+version, then choose "Retry". For a custom VLC installation, use "Choose folder"
+and select the directory containing libvlc.dll, libvlccore.dll and plugins.
+
+The Full edition includes both requirements and is also available.

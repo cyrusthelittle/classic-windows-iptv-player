@@ -8,12 +8,13 @@
     <Nullable>enable</Nullable>
     <AssemblyName>Classic Windows IPTV Player</AssemblyName>
     <RootNamespace>ClassicWindowsIptvPlayer.Windows</RootNamespace>
-    <Version>0.8.3</Version>
-    <FileVersion>0.8.3.0</FileVersion>
-    <AssemblyVersion>0.8.3.0</AssemblyVersion>
+    <Version>0.8.5</Version>
+    <FileVersion>0.8.5.0</FileVersion>
+    <AssemblyVersion>0.8.5.0</AssemblyVersion>
     <PlatformTarget>x64</PlatformTarget>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <PublishSingleFile>false</PublishSingleFile>
+    <BundleVlc Condition="'$(BundleVlc)' == ''">true</BundleVlc>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <ApplicationIcon>Assets\ClassicWindowsIptvPlayer.ico</ApplicationIcon>
     <!-- App is x64-only; skip bundling the x86/arm64 native LibVLC binaries (~180 MB) -->
@@ -32,10 +33,12 @@
   <ItemGroup>
     <Resource Include="Assets\ClassicWindowsIptvPlayer.ico" />
     <Resource Include="Assets\iptv-logo.png" />
+    <Content Include="Assets\LightStartHere.txt" Condition="'$(BundleVlc)' == 'false' and '$(SelfContained)' != 'true'"
+             Link="Read Me First!!!.txt" CopyToPublishDirectory="Always" />
     <ProjectReference Include="..\ClassicWindowsIptvPlayer.Core\ClassicWindowsIptvPlayer.Core.csproj" /><ProjectReference Include="..\ClassicWindowsIptvPlayer.Updater\ClassicWindowsIptvPlayer.Updater.csproj" ReferenceOutputAssembly="false" />
     <PackageReference Include="LibVLCSharp.WPF" Version="3.9.7.1" />
     <PackageReference Include="LibVLCSharp.WinForms" Version="3.9.7.1" />
-    <PackageReference Include="VideoLAN.LibVLC.Windows" Version="3.0.23.1" />
+    <PackageReference Include="VideoLAN.LibVLC.Windows" Version="3.0.23.1" Condition="'$(BundleVlc)' == 'true'" />
   </ItemGroup>
   <Target Name="CopyUpdaterHelper" AfterTargets="Build">
     <ItemGroup><UpdaterFiles Include="../ClassicWindowsIptvPlayer.Updater/bin/$(Configuration)/net10.0-windows/win-x64/ClassicWindowsIptvPlayer.Updater.*" /></ItemGroup>

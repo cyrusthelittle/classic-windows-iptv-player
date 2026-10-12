@@ -94,3 +94,9 @@ These fixtures do not launch an old-version-to-new-version production upgrade, o
 ## Acceptance follow-up (3 October 2026)
 
 Step 25's production Settings fixture now also saves light/dark WPF bitmaps, checks dark notice-text contrast at 4.5:1 or better, and uses a generated finite local WAV classified as Live to verify native positive-length slider seeking and cursor retention after release. The final run passed 42 assertions. This complements the 10 HLS buffered-seek/time-label checks; it does not reproduce a positive-length HLS provider or physical pointer dragging. See tests/ClassicWindowsIptvPlayer.FeedbackUiChecks/README.md for the new crash/feedback production-dialog harness and its isolated in-memory delivery contract.
+
+## VLC discovery and fallback
+
+`ClassicWindowsIptvPlayer.VlcRuntimeChecks` covers installed/local VLC selection,
+architecture, failed native loading and the rendered recovery prompt. Its README
+explains optional production native checks using a published player and isolated data.

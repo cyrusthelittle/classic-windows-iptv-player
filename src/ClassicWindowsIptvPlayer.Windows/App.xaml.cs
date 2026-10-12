@@ -11,6 +11,7 @@ namespace ClassicWindowsIptvPlayer.Windows;
 
 public partial class App : WpfApplication
 {
+    private readonly bool _isVlcRuntimeProbe = Environment.GetCommandLineArgs().Skip(1).FirstOrDefault() == VlcRuntime.ProbeArgument;
     private readonly bool _isUpdateHealthProbe = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable(UpdateInstaller.HealthVariable));
     private readonly string _sessionDirectory = string.Empty;
     private readonly Exception? _startupDataError;
@@ -21,6 +22,7 @@ public partial class App : WpfApplication
 
     public App()
     {
+        if (_isVlcRuntimeProbe) return;
         try
         {
             _installationLease = new InstallationLease(AppContext.BaseDirectory);
@@ -75,6 +77,7 @@ public partial class App : WpfApplication
 
     private async void OnStartup(object sender, StartupEventArgs e)
     {
+        if (_isVlcRuntimeProbe) { Shutdown(VlcRuntime.RunProbe(e.Args)); return; }
         if (_startupDataError is not null)
         {
             if (_isUpdateHealthProbe) { Shutdown(1); return; }
@@ -114,6 +117,18 @@ public partial class App : WpfApplication
 
         try
         {
+            string? chosenVlcDirectory = null;
+            while (true)
+            {
+                try { await Task.Run(() => VlcRuntime.Initialize(chosenVlcDirectory)); break; }
+                catch (VlcRuntimeUnavailableException)
+                {
+                    if (_isUpdateHealthProbe) { Shutdown(1); return; }
+                    var prompt = new VlcRequiredWindow();
+                    if (prompt.ShowDialog() != true) { Shutdown(); return; }
+                    chosenVlcDirectory = prompt.ChosenDirectory;
+                }
+            }
             var startupStore = new ConfigStore();
             var startupState = startupStore.Load();
             if (_isUpdateHealthProbe)
@@ -122,7 +137,7 @@ public partial class App : WpfApplication
                 _ = new LoginWindow(); // Load actual account-dialog XAML without showing it.
                 var account = startupState.EnsureSelectedAccount();
                 _ = new MainWindow(new LoginResult { Account = account.Settings.Clone(), AccountId = account.Id }, updateHealthProbe: true);
-                LibVLCSharp.Shared.Core.Initialize();
+                VlcRuntime.Initialize();
                 using (var native = new LibVLCSharp.Shared.LibVLC("--no-video-title-show"))
                 using (var player = new LibVLCSharp.Shared.MediaPlayer(native)) { } // No streams, providers or recordings.
                 AcknowledgeUpdateStartup();

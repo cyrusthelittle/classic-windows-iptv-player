@@ -490,7 +490,7 @@ public partial class MainWindow : Window
         var buffer = GetPlaybackBufferMs();
         var initializedVlc = await Task.Run(() =>
         {
-            LibVLCSharp.Shared.Core.Initialize();
+            VlcRuntime.Initialize();
             return new LibVLC(
                 "--ignore-config",
                 "--input-timeshift-path=" + AppDataPaths.Temp,

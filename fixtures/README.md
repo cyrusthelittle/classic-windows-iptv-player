@@ -23,12 +23,11 @@ The cost is that every installation starts on the same two accounts. If the
 provider rate-limits or bans them, that affects all users at once. Reissue them
 by replacing this file and rebuilding.
 
-## Relationship to the local test copies
+## Release copies
 
-The same file is seeded into `release\classic-windows-iptv-player\` and into the
-private test build's output folder. `release\` is gitignored, so only the copy
-in this folder is tracked; the others are local artifacts and are recreated on
-each build.
+The file is seeded into the selected `release\full\` or `release\light\` output
+when account settings are missing. `release\` is gitignored, so only the copy in
+this fixture folder is tracked. Rebuilding preserves existing account settings.
 
 If you would rather ship an empty account list, delete this file and remove the
 `copy /y fixtures\accounts.json ...` line from the release script. The app

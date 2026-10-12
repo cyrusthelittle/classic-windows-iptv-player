@@ -38,9 +38,9 @@ Do not copy only the EXE. Keep `libvlc.dll`, `libvlccore.dll`, and the `plugins`
 - About 600 MB of free disk space
 - An internet connection
 
-The release is self-contained and bundles the .NET runtime and 64-bit LibVLC. Windows SmartScreen may warn on first launch because the app is unsigned; use **More info > Run anyway** if you trust the downloaded release.
+The full release bundles the .NET runtime and 64-bit LibVLC. The light release requires the .NET 10 Windows Desktop Runtime and a compatible 64-bit VLC 3 installation. Its included `Read Me First!!!.txt` explains both downloads with official links. The player checks installed VLC first, then the local `libvlc/win-x64`, `libvlc` and application folders. It checks native loading in a separate process before using a candidate. If no working VLC is found, startup offers Download VLC, Choose folder, Retry and Cancel; downloads open the official VideoLAN website only when selected. Windows SmartScreen may warn on first launch because the app is unsigned; use **More info > Run anyway** if you trust the downloaded release.
 
-The player and updater share the bundled .NET files. Keep the entire release folder together, including the updater DLL, dependency manifest and runtime configuration. Before installation, the updater and its required runtime files are copied to a separate working folder so the installed files can be replaced.
+In the full release, the player and updater share the bundled .NET files. Keep the entire release folder together, including the updater DLL, dependency manifest and runtime configuration. Before installation, the updater and its required runtime files are copied to a separate working folder so the installed files can be replaced.
 
 ## First use
 
@@ -189,16 +189,18 @@ Requirements:
 - Windows 10 or Windows 11, 64-bit
 - [.NET SDK 10](https://dotnet.microsoft.com/download/dotnet/10.0)
 
-Create a self-contained release:
+Create a full release with .NET and LibVLC, or a light release requiring both installed separately:
 
 ```bat
-scripts\BUILD_WINDOWS_RELEASE.bat
+scripts\BUILD_WINDOWS_RELEASE.bat full
+scripts\BUILD_WINDOWS_RELEASE.bat light
 ```
 
 The output is written to:
 
 ```text
-release\classic-windows-iptv-player
+release\full
+release\light
 ```
 
 Run a development build:
