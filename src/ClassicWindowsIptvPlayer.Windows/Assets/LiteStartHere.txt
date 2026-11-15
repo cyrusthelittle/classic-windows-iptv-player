@@ -1,4 +1,4 @@
-CLASSIC WINDOWS IPTV PLAYER - LIGHT EDITION
+CLASSIC WINDOWS IPTV PLAYER - LITE EDITION
 
 Before first use, install these two requirements on Windows 10 or 11 (64-bit):
 
@@ -17,7 +17,7 @@ If both are already installed, you can start the player immediately.
 
 START THE PLAYER
 
-Extract the entire Light package and keep its files together.
+Extract the entire Lite package and keep its files together.
 Open "Classic Windows IPTV Player.exe".
 
 If the launcher says .NET is missing, install the Desktop Runtime from step 1
