@@ -7,7 +7,7 @@ using ClassicWindowsIptvPlayer.Core;
 
 internal static class ProductionUpgradeChecks
 {
-    public static async Task Run(string repo, string helper, RSA key, string publicKey)
+    public static async Task Run(string repo, string helper)
     {
         var root = Path.Combine(FixtureTools.Root, "production-upgrade"); Directory.CreateDirectory(root);
         var versions = new Dictionary<string, string>();
@@ -15,7 +15,7 @@ internal static class ProductionUpgradeChecks
         {
             var artifacts = Path.Combine(root, "build-" + version);
             var built = await FixtureTools.Run("dotnet", ["build", Path.Combine(repo, "src/ClassicWindowsIptvPlayer.Windows/ClassicWindowsIptvPlayer.Windows.csproj"),
-                "-c", "Release", "--artifacts-path", artifacts, "-p:UpdateTrustPath=" + publicKey, "-p:Version=" + version,
+                "-c", "Release", "--artifacts-path", artifacts, "-p:Version=" + version,
                 "-p:FileVersion=" + version + ".0", "-p:AssemblyVersion=" + version + ".0", "-p:NuGetAudit=false", "-p:DefaultItemExcludesInProjectFolder=**/artifacts/**"],
                 Path.Combine(root, "fixture-build-data"), repo, 180);
             if (built.ExitCode != 0) throw new InvalidOperationException("Production fixture build failed: " + built.Output);
@@ -43,7 +43,7 @@ internal static class ProductionUpgradeChecks
         store.Save(state); store.SaveChannelCache(state.SelectedAccountId, [new() { Id = "fixture-channel", Name = "Fixture", Url = settings.M3uUrl }]);
         var saved = Directory.GetFiles(data, "*", SearchOption.AllDirectories).ToDictionary(p => p, File.ReadAllBytes);
         var stage = Path.Combine(data, "updates", "production-stage"); Directory.CreateDirectory(stage);
-        var package = Path.Combine(stage, AuthenticatedUpdate.PackageName("v2.0.0")); var files = new List<UpdateFile>();
+        var package = Path.Combine(stage, AuthenticatedUpdate.PackageName("v2.0.0", UpdateEdition.Full)); var files = new List<UpdateFile>();
         using (var archive = ZipFile.Open(package, ZipArchiveMode.Create))
         foreach (var path in Directory.GetFiles(versions["2.0.0"], "*", SearchOption.AllDirectories))
         {
@@ -54,17 +54,17 @@ internal static class ProductionUpgradeChecks
             using var output = archive.CreateEntry(relative, CompressionLevel.Fastest).Open(); input.CopyTo(output);
         }
         string packageHash; using (var input = File.OpenRead(package)) packageHash = Convert.ToHexString(SHA256.HashData(input));
-        var manifest = new UpdateManifest(1, AuthenticatedUpdate.Repository, "v2.0.0", "2.0.0", "win-x64", Path.GetFileName(package), new FileInfo(package).Length,
+        var manifest = new UpdateManifest(AuthenticatedUpdate.ManifestFormat, AuthenticatedUpdate.Repository, "v2.0.0", "2.0.0", "win-x64", Path.GetFileName(package), new FileInfo(package).Length,
             packageHash, AppState.CurrentSchemaVersion, files.ToArray());
-        var manifestBytes = JsonSerializer.SerializeToUtf8Bytes(manifest); var signature = key.SignData(manifestBytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pss);
-        AuthenticatedUpdate.VerifyManifest(manifestBytes, signature, "v2.0.0", new Version(1, 0, 0), key.ExportSubjectPublicKeyInfoPem());
-        File.WriteAllBytes(Path.Combine(stage, AuthenticatedUpdate.ManifestName), manifestBytes); File.WriteAllBytes(Path.Combine(stage, AuthenticatedUpdate.SignatureName), signature);
-        var job = Path.Combine(stage, "job.json"); File.WriteAllText(job, JsonSerializer.Serialize(new UpdateJob(stage, install, data, 0, "1.0.0", "v2.0.0")));
+        var manifestBytes = JsonSerializer.SerializeToUtf8Bytes(manifest);
+        AuthenticatedUpdate.VerifyManifest(manifestBytes, "v2.0.0", new Version(1, 0, 0), UpdateEdition.Full);
+        File.WriteAllBytes(Path.Combine(stage, AuthenticatedUpdate.ManifestName(UpdateEdition.Full)), manifestBytes);
+        var job = Path.Combine(stage, "job.json"); File.WriteAllText(job, JsonSerializer.Serialize(new UpdateJob(stage, install, data, 0, "1.0.0", "v2.0.0", UpdateEdition.Full)));
         try
         {
             // A long-lived relaunched GUI inherits redirected handles. Do not wait for that GUI to close to read helper output.
             var result = await FixtureTools.Run(helper, ["--apply", job], data, root, 180, captureOutput: false);
-            FixtureTools.Check(result.ExitCode == 0, "signed update applies actual production 1.0.0 to 2.0.0 and passes WPF/native health probe");
+            FixtureTools.Check(result.ExitCode == 0, "update applies actual production 1.0.0 to 2.0.0 and passes WPF/native health probe");
             FixtureTools.Check(FileVersionInfo.GetVersionInfo(Path.Combine(install, "Classic Windows IPTV Player.dll")).FileVersion == "2.0.0.0", "installed production application reports new file version");
             FixtureTools.Check(saved.All(p => File.ReadAllBytes(p.Key).SequenceEqual(p.Value)), "actual production update preserves protected account/history/favorites/cache bytes");
             var loaded = store.Load();

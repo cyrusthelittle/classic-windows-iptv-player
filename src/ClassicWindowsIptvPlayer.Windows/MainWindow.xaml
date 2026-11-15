@@ -121,7 +121,7 @@
                     <MenuItem x:Name="DarkModeMenuItem" Header="Dark mode" IsCheckable="True" Click="ToggleDarkMode_Click" />
                     <MenuItem x:Name="EpgEnabledMenuItem" Header="Programme guide (EPG)" IsCheckable="True" Click="ToggleEpg_Click" />
                     <MenuItem x:Name="UpdateChecksMenuItem" Header="Check for updates on startup" IsCheckable="True" Click="ToggleUpdateChecks_Click" />
-                    <MenuItem x:Name="AutomaticUpdateDownloadMenuItem" Header="Download signed updates automatically (ask before restart)" IsCheckable="True" Click="ToggleAutomaticUpdateDownload_Click" />
+                    <MenuItem x:Name="AutomaticUpdateDownloadMenuItem" Header="Download updates automatically (ask before restart)" IsCheckable="True" Click="ToggleAutomaticUpdateDownload_Click" />
                     <Separator />
                     <MenuItem x:Name="RemoteControlMenuItem" Header="Phone remote" IsCheckable="True" Click="RemoteControlMenuItem_Click" />
                     <Separator />

@@ -1,5 +1,7 @@
 # Isolated updater process checks
 
+> **15 November 2026:** update signing was removed in 0.9.0 (see [docs/UPDATES.md](../../docs/UPDATES.md)). The fixtures no longer generate a key or pass `UpdateTrustPath`; the former corrupted-signature case is now an `edition` case, where a Full package staged for a Lite job must be refused. Older wording below about keys and signed packages describes the earlier contract. Current results: the `--production` real-app upgrade passed all nine assertions. The ordinary scenario run stops at its first case because the invented fixture app cannot load its account data (`Valid: false`); the unmodified 0.8.5 code fails the same way, so the fixture's data layout needs refreshing separately.
+
 From `public`, build and run:
 
 ```powershell

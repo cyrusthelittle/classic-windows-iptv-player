@@ -17,6 +17,9 @@ public sealed class GitHubUpdateService
     internal const int MaximumNotesCharacters = 16_000;
     private static readonly HttpClient HttpClient = CreateHttpClient();
     public Version CurrentVersion => NormalizeVersion(Assembly.GetEntryAssembly()?.GetName().Version ?? new Version(0, 0, 0, 0));
+    /// <summary>The edition stamped into this build (Full or Lite); updates download the same edition.</summary>
+    public static string Edition { get; } = typeof(GitHubUpdateService).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
+        .FirstOrDefault(a => a.Key == "UpdateEdition")?.Value is Core.UpdateEdition.Lite ? Core.UpdateEdition.Lite : Core.UpdateEdition.Full;
     public async Task<GitHubReleaseInfo?> GetAvailableUpdateAsync(CancellationToken cancellationToken = default)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);

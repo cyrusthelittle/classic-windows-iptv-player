@@ -3,7 +3,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 namespace ClassicWindowsIptvPlayer.Core;
 
-public sealed record UpdateJob(string StageDirectory, string InstallDirectory, string DataRoot, int ParentProcessId, string CurrentVersion, string Tag);
+public sealed record UpdateJob(string StageDirectory, string InstallDirectory, string DataRoot, int ParentProcessId, string CurrentVersion, string Tag, string Edition = UpdateEdition.Full);
 public sealed record UpdateBackup(string Path, bool Existed, string? Sha256);
 public sealed record UpdateJournal(string WorkDirectory, UpdateBackup[] Files);
 
@@ -31,8 +31,8 @@ public static class UpdateInstaller
         var pending = Path.Combine(job.InstallDirectory, PendingMarker);
         if (File.Exists(pending)) Recover(job, pending);
         if (recoverOnly) return 0;
-        var manifest = AuthenticatedUpdate.VerifyManifest(File.ReadAllBytes(Path.Combine(job.StageDirectory, AuthenticatedUpdate.ManifestName)),
-            File.ReadAllBytes(Path.Combine(job.StageDirectory, AuthenticatedUpdate.SignatureName)), job.Tag, Version.Parse(job.CurrentVersion));
+        var manifest = AuthenticatedUpdate.VerifyManifest(File.ReadAllBytes(Path.Combine(job.StageDirectory, AuthenticatedUpdate.ManifestName(job.Edition))),
+            job.Tag, Version.Parse(job.CurrentVersion), job.Edition);
         var work = Path.Combine(job.StageDirectory, "apply-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(work);
         var extracted = Path.Combine(work, "payload"); Directory.CreateDirectory(extracted);
@@ -143,7 +143,7 @@ public static class UpdateInstaller
         var expectedStages = Path.Combine(Path.GetFullPath(job.DataRoot), "updates") + Path.DirectorySeparatorChar;
         if (!Path.GetFullPath(job.StageDirectory).StartsWith(expectedStages, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("The update stage must be inside the pinned data root's updates folder.");
         if (!Version.TryParse(job.CurrentVersion, out _) || job.ParentProcessId < 0) throw new InvalidDataException("Invalid update job.");
-        AuthenticatedUpdate.ValidateTag(job.Tag);
+        AuthenticatedUpdate.ValidateTag(job.Tag); UpdateEdition.Validate(job.Edition);
     }
     private static void WriteDurable(string path, byte[] bytes)
     {

@@ -48,7 +48,7 @@ internal static class UiChecks
         shutdown.SetValue(window, true); FixtureTools.Check(!Allowed(), "restart predicate blocks shutting down"); shutdown.SetValue(window, false);
         var page = new Uri("https://github.com/cyrusthelittle/classic-windows-iptv-player/releases/tag/v2.0.0");
         var release = new GitHubReleaseInfo(new Version(2, 0, 0), "v2.0.0", "Invented", page, "Fixture notes");
-        var manifest = new UpdateManifest(1, AuthenticatedUpdate.Repository, "v2.0.0", "2.0.0", "win-x64", AuthenticatedUpdate.PackageName("v2.0.0"), 1, new string('0', 64), AppState.CurrentSchemaVersion, []);
+        var manifest = new UpdateManifest(AuthenticatedUpdate.ManifestFormat, AuthenticatedUpdate.Repository, "v2.0.0", "2.0.0", "win-x64", AuthenticatedUpdate.PackageName("v2.0.0", UpdateEdition.Full), 1, new string('0', 64), AppState.CurrentSchemaVersion, []);
         var ready = new UpdateWindow(new Version(1, 0, 0), release, stagedUpdate: new StagedUpdate(FixtureTools.Root, manifest));
         FixtureTools.Check(((Button)ready.FindName("UpdateButton")).Content.ToString() == "Restart to update" && ((Button)ready.FindName("LaterButton")).Content.ToString() == "Later", "staged offer presents explicit restart and later choices");
         FixtureTools.Check(ready.PromptResult == UpdatePromptResult.RemindLater, "staged offer does not choose restart itself");

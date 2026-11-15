@@ -10,19 +10,17 @@ public sealed record UpdateManifest(int Format, string Repository, string Tag, s
     string Package, long PackageSize, string PackageSha256, int DataSchema, UpdateFile[] Files);
 public sealed record StagedUpdate(string Directory, UpdateManifest Manifest);
 
-/// <summary>Both the running app and the separate helper use this compiled trust anchor.</summary>
-public static class UpdateTrust
+/// <summary>
+/// Unsigned update contract: the release's manifest lists the package and every file with its size and
+/// SHA-256, so a corrupt, truncated or mismatched download is refused before anything is installed.
+/// Trust comes from the HTTPS download of this repository's GitHub release; there is no signing key.
+/// Each edition has its own manifest and package so an installation always receives its own edition.
+/// </summary>
+public static class UpdateEdition
 {
-    public static string PublicKey
-    {
-        get
-        {
-            using var stream = typeof(UpdateTrust).Assembly.GetManifestResourceStream("UpdateTrust.pem");
-            if (stream is null) throw new InvalidDataException("This build has no update signing key. Open the release on GitHub.");
-            using var reader = new StreamReader(stream);
-            return reader.ReadToEnd();
-        }
-    }
+    public const string Full = "full";
+    public const string Lite = "lite";
+    public static string Validate(string? edition) => edition is Full or Lite ? edition : throw new InvalidDataException("Unknown update edition.");
 }
 
 public static class AuthenticatedUpdate
@@ -30,30 +28,29 @@ public static class AuthenticatedUpdate
     public const string Repository = "cyrusthelittle/classic-windows-iptv-player";
     public const string ApplicationExe = "Classic Windows IPTV Player.exe";
     public const string HelperExe = "ClassicWindowsIptvPlayer.Updater.exe";
-    public const string ManifestName = "update-manifest.json";
-    public const string SignatureName = "update-manifest.sig";
+    public const int ManifestFormat = 2;
+    public const string ReadMeFirst = "Read Me First!!!.txt";
+    public static string ManifestName(string edition) => "update-manifest-" + UpdateEdition.Validate(edition) + ".json";
     public const long MaximumPackageBytes = 1024L * 1024 * 1024;
     public const long MaximumExpandedBytes = 2L * 1024 * 1024 * 1024;
-    public static string PackageName(string tag) => "ClassicWindowsIPTVPlayer-" + tag + "-win-x64.zip";
+    public static string PackageName(string tag, string edition) => "ClassicWindowsIPTVPlayer-" + tag + "-win-x64-" + UpdateEdition.Validate(edition) + ".zip";
     public static void ValidateTag(string tag)
     {
         if (!Regex.IsMatch(tag, @"^v?[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$", RegexOptions.CultureInvariant) || tag.Length > 64)
             throw new InvalidDataException("This release tag does not support automatic installation. Open it on GitHub.");
     }
-    public static UpdateManifest VerifyManifest(byte[] bytes, byte[] signature, string tag, Version currentVersion, string? publicKey = null)
+    public static UpdateManifest VerifyManifest(byte[] bytes, string tag, Version currentVersion, string edition)
     {
-        ValidateTag(tag);
-        if (bytes.Length is 0 or > 1048576 || signature.Length is < 256 or > 1024) throw new InvalidDataException("Invalid update signature or manifest size.");
-        using var key = RSA.Create();
-        key.ImportFromPem(publicKey ?? UpdateTrust.PublicKey);
-        if (key.KeySize < 3072 || !key.VerifyData(bytes, signature, HashAlgorithmName.SHA256, RSASignaturePadding.Pss))
-            throw new InvalidDataException("The update is not authenticated by this app's signing key. Open the release on GitHub.");
-        var manifest = JsonSerializer.Deserialize<UpdateManifest>(bytes) ?? throw new InvalidDataException("Empty update manifest.");
-        if (manifest.Format != 1 || manifest.Repository != Repository || manifest.Tag != tag || manifest.Runtime != "win-x64" ||
-            manifest.Package != PackageName(tag) || manifest.PackageSize is <= 0 or > MaximumPackageBytes || manifest.DataSchema != AppState.CurrentSchemaVersion ||
+        ValidateTag(tag); UpdateEdition.Validate(edition);
+        if (bytes.Length is 0 or > 1048576) throw new InvalidDataException("Invalid update manifest size.");
+        UpdateManifest manifest;
+        try { manifest = JsonSerializer.Deserialize<UpdateManifest>(bytes) ?? throw new InvalidDataException("Empty update manifest."); }
+        catch (JsonException) { throw new InvalidDataException("The update manifest is not valid. Open the release on GitHub."); }
+        if (manifest.Format != ManifestFormat || manifest.Repository != Repository || manifest.Tag != tag || manifest.Runtime != "win-x64" ||
+            manifest.Package != PackageName(tag, edition) || manifest.PackageSize is <= 0 or > MaximumPackageBytes || manifest.DataSchema != AppState.CurrentSchemaVersion ||
             !Version.TryParse(manifest.Version, out var version) || Normalize(version) <= Normalize(currentVersion) ||
             Normalize(version) != Normalize(Version.Parse(tag.TrimStart('v'))) || !ValidHash(manifest.PackageSha256))
-            throw new InvalidDataException("The signed update does not match this release, platform or saved-data schema.");
+            throw new InvalidDataException("The update does not match this release, platform or saved-data schema.");
         if (manifest.Files is null || manifest.Files.Length is 0 or > 20000) throw new InvalidDataException("Invalid update file list.");
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         long expanded = 0;
@@ -65,7 +62,7 @@ public static class AuthenticatedUpdate
             if (expanded > MaximumExpandedBytes) throw new InvalidDataException("Update expanded size exceeded its limit.");
         }
         if (!names.Contains(ApplicationExe) || !names.Contains(HelperExe) || !names.Contains("ClassicWindowsIptvPlayer.Core.dll"))
-            throw new InvalidDataException("The signed update omits required application files.");
+            throw new InvalidDataException("The update omits required application files.");
         return manifest;
     }
     private static Version Normalize(Version value) => new(value.Major, Math.Max(0, value.Minor), Math.Max(0, value.Build), Math.Max(0, value.Revision));
@@ -84,6 +81,8 @@ public static class AuthenticatedUpdate
         }
         var ext = Path.GetExtension(path).ToLowerInvariant();
         var bundledBlurayJar = path is "libvlc/win-x64/plugins/access/libbluray-awt-j2se-1.4.0.jar" or "libvlc/win-x64/plugins/access/libbluray-j2se-1.4.0.jar";
+        // The Lite edition ships its setup guide beside the exe; it is the only text file an update may carry.
+        if (path == ReadMeFirst) return;
         if (ext == ".exe" && path != ApplicationExe && path != HelperExe && path != "createdump.exe" ||
             ext == ".json" && !path.EndsWith(".deps.json", StringComparison.Ordinal) && !path.EndsWith(".runtimeconfig.json", StringComparison.Ordinal) ||
             ext is not (".exe" or ".dll" or ".json" or ".pdb" or ".ico" or ".png") && !bundledBlurayJar)
@@ -140,11 +139,11 @@ public static class AuthenticatedUpdate
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 size += read;
-                if (size > file.Size) throw new InvalidDataException("Expanded update file exceeded its signed size.");
+                if (size > file.Size) throw new InvalidDataException("Expanded update file exceeded its listed size.");
                 hash.AppendData(buffer, 0, read); target?.Write(buffer, 0, read);
             }
             if (size != file.Size || !Convert.ToHexString(hash.GetHashAndReset()).Equals(file.Sha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("An update file checksum did not match.");
         }
-        if (seen.Count != expected.Count) throw new InvalidDataException("The package is missing signed files.");
+        if (seen.Count != expected.Count) throw new InvalidDataException("The package is missing listed files.");
     }
 }

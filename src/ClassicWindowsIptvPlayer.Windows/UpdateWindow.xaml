@@ -34,7 +34,7 @@
         <StackPanel Grid.Row="5" Margin="0,12,0,12">
             <Button Content="Open this release on GitHub" HorizontalAlignment="Left" Style="{StaticResource GhostButton}" Click="OpenRelease_Click" />
             <TextBlock x:Name="LinkErrorText" Visibility="Collapsed" Foreground="{DynamicResource ErrorTextBrush}" TextWrapping="Wrap" Margin="0,6,0,0" />
-            <TextBlock x:Name="DownloadStatusText" Text="Update now downloads and verifies a signed update. You choose when to restart." Foreground="{DynamicResource Text2Brush}" TextWrapping="Wrap" Margin="0,8,0,0" />
+            <TextBlock x:Name="DownloadStatusText" Text="Update now downloads and checks the update for your edition. You choose when to restart." Foreground="{DynamicResource Text2Brush}" TextWrapping="Wrap" Margin="0,8,0,0" />
         </StackPanel>
 
         </Grid></ScrollViewer>

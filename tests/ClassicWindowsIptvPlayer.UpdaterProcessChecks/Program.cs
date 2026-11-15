@@ -20,23 +20,19 @@ internal static class Program
         var production = args.Length == 2 && args[0] == "--production";
         if (args.Length != 1 && !production) throw new ArgumentException("Pass [--production] and the absolute public repository directory.");
         var repo = Path.GetFullPath(args[^1]);
-        using var key = RSA.Create(3072);
-        // Fixture private material remains only in memory. The helper embeds only the fixture public key.
-        var publicKey = Path.Combine(FixtureTools.Root, "fixture-public.pem");
-        File.WriteAllText(publicKey, key.ExportSubjectPublicKeyInfoPem());
         var artifacts = Path.Combine(FixtureTools.Root, "build");
         foreach (var project in new[] { "src/ClassicWindowsIptvPlayer.Updater/ClassicWindowsIptvPlayer.Updater.csproj", "tests/ClassicWindowsIptvPlayer.UpdaterProcessChecks/FixtureApp/FixtureApp.csproj" })
         {
-            var build = await FixtureTools.Run("dotnet", ["build", Path.Combine(repo, project), "-c", "Release", "--artifacts-path", artifacts, "-p:UpdateTrustPath=" + publicKey, "-p:NuGetAudit=false"], Path.Combine(FixtureTools.Root, "fixture-data-build"), repo, 180);
+            var build = await FixtureTools.Run("dotnet", ["build", Path.Combine(repo, project), "-c", "Release", "--artifacts-path", artifacts, "-p:NuGetAudit=false"], Path.Combine(FixtureTools.Root, "fixture-data-build"), repo, 180);
             if (build.ExitCode != 0) throw new InvalidOperationException("Fixture build failed: " + build.Output);
         }
         var helper = Directory.GetFiles(Path.Combine(artifacts, "bin"), AuthenticatedUpdate.HelperExe, SearchOption.AllDirectories).Single();
-        if (production) { await ProductionUpgradeChecks.Run(repo, helper, key, publicKey); return; }
+        if (production) { await ProductionUpgradeChecks.Run(repo, helper); return; }
         var probe = Directory.GetFiles(Path.Combine(artifacts, "bin", "FixtureApp"), AuthenticatedUpdate.ApplicationExe, SearchOption.AllDirectories).Single();
-        foreach (var kind in new[] { "healthy", "signature", "hash", "unsafe-zip", "locked", "launch-failure", "health-crash", "interrupted", "killed-apply" })
-            await Scenario(kind, helper, Path.GetDirectoryName(probe)!, key);
+        foreach (var kind in new[] { "healthy", "edition", "hash", "unsafe-zip", "locked", "launch-failure", "health-crash", "interrupted", "killed-apply" })
+            await Scenario(kind, helper, Path.GetDirectoryName(probe)!);
     }
-    static async Task Scenario(string kind, string helper, string probeDirectory, RSA key)
+    static async Task Scenario(string kind, string helper, string probeDirectory)
     {
         var root = Path.Combine(FixtureTools.Root, kind);
         var install = Path.Combine(root, "install");
@@ -70,23 +66,22 @@ internal static class Program
         if (kind == "health-crash") files["fixture-marker.dll"] = [8, 8, 8];
         var previous = Directory.GetFiles(install).ToDictionary(p => p, File.ReadAllBytes);
         if (kind == "launch-failure") files[AuthenticatedUpdate.ApplicationExe] = [0, 1, 2];
-        var package = Path.Combine(stage, AuthenticatedUpdate.PackageName("v2.0.0"));
+        // The "edition" case stages a Full package for an install that says it is Lite; the helper must refuse it.
+        var edition = kind == "edition" ? UpdateEdition.Lite : UpdateEdition.Full;
+        var package = Path.Combine(stage, AuthenticatedUpdate.PackageName("v2.0.0", UpdateEdition.Full));
         using (var zip = ZipFile.Open(package, ZipArchiveMode.Create))
         {
             foreach (var (name, bytes) in files) { using var entry = zip.CreateEntry(name).Open(); entry.Write(bytes); }
             if (kind == "unsafe-zip") { using var entry = zip.CreateEntry("../escape.dll").Open(); entry.WriteByte(7); }
         }
         var packageBytes = File.ReadAllBytes(package);
-        var manifest = new UpdateManifest(1, AuthenticatedUpdate.Repository, "v2.0.0", "2.0.0", "win-x64", Path.GetFileName(package), packageBytes.Length,
+        var manifest = new UpdateManifest(AuthenticatedUpdate.ManifestFormat, AuthenticatedUpdate.Repository, "v2.0.0", "2.0.0", "win-x64", Path.GetFileName(package), packageBytes.Length,
             Convert.ToHexString(SHA256.HashData(packageBytes)), AppState.CurrentSchemaVersion, files.Select(p => new UpdateFile(p.Key, p.Value.Length, Convert.ToHexString(SHA256.HashData(p.Value)))).ToArray());
         var bytesManifest = JsonSerializer.SerializeToUtf8Bytes(manifest);
-        var signature = key.SignData(bytesManifest, HashAlgorithmName.SHA256, RSASignaturePadding.Pss);
-        if (kind == "signature") signature[0] ^= 1;
-        File.WriteAllBytes(Path.Combine(stage, AuthenticatedUpdate.ManifestName), bytesManifest);
-        File.WriteAllBytes(Path.Combine(stage, AuthenticatedUpdate.SignatureName), signature);
+        File.WriteAllBytes(Path.Combine(stage, AuthenticatedUpdate.ManifestName(edition)), bytesManifest);
         if (kind == "hash") { packageBytes[^1] ^= 1; File.WriteAllBytes(package, packageBytes); }
         var job = Path.Combine(stage, "job.json");
-        File.WriteAllText(job, JsonSerializer.Serialize(new { StageDirectory = stage, InstallDirectory = install, DataRoot = data, ParentProcessId = 0, CurrentVersion = "1.0.0", Tag = "v2.0.0" }));
+        File.WriteAllText(job, JsonSerializer.Serialize(new { StageDirectory = stage, InstallDirectory = install, DataRoot = data, ParentProcessId = 0, CurrentVersion = "1.0.0", Tag = "v2.0.0", Edition = edition }));
         if (kind == "killed-apply")
         {
             var writing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

@@ -29,8 +29,6 @@ internal static class WindowsDataProtection
     public static byte[] Protect(byte[] bytes, byte[] entropy) => Transform(bytes, entropy, protect: true);
     public static byte[] Unprotect(byte[] bytes, byte[] entropy) => Transform(bytes, entropy, protect: false);
 
-    public static byte[] ProtectSigningKey(byte[] bytes, byte[] entropy) => Transform(bytes, entropy, protect: true, clearMemory: true);
-    public static byte[] UnprotectSigningKey(byte[] bytes, byte[] entropy) => Transform(bytes, entropy, protect: false, clearMemory: true);
     private static void ClearBlob(Blob blob)
     {
         if (blob.Data == IntPtr.Zero || blob.Length <= 0) return;

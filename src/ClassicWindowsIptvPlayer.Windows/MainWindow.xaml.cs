@@ -4482,7 +4482,7 @@ public partial class MainWindow : Window
     {
         _state.DownloadUpdatesAutomatically = AutomaticUpdateDownloadMenuItem.IsChecked;
         _store.Save(_state);
-        StatusText.Text = _state.DownloadUpdatesAutomatically ? "Signed updates will download when an update is offered. Restart always requires your choice." : "Automatic update downloads disabled.";
+        StatusText.Text = _state.DownloadUpdatesAutomatically ? "Updates will download when an update is offered. Restart always requires your choice." : "Automatic update downloads disabled.";
     }
 
     private async Task CheckForUpdatesAsync(bool showUpToDateMessage)
@@ -4584,7 +4584,7 @@ public partial class MainWindow : Window
     {
         var runner = Path.Combine(staged.Directory, "runner-" + Guid.NewGuid().ToString("N"));
         UpdaterRunner.CopyFiles(AppContext.BaseDirectory, runner);
-        var job = new UpdateJob(staged.Directory, Path.GetFullPath(AppContext.BaseDirectory), AppDataPaths.Root, Environment.ProcessId, _updateService.CurrentVersion.ToString(), release.DisplayVersion);
+        var job = new UpdateJob(staged.Directory, Path.GetFullPath(AppContext.BaseDirectory), AppDataPaths.Root, Environment.ProcessId, _updateService.CurrentVersion.ToString(), release.DisplayVersion, GitHubUpdateService.Edition);
         var jobPath = Path.Combine(staged.Directory, "update-job.json");
         File.WriteAllBytes(jobPath, System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(job));
         var start = new ProcessStartInfo(Path.Combine(runner, AuthenticatedUpdate.HelperExe)) { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = runner };

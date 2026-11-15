@@ -33,6 +33,9 @@
   <ItemGroup>
     <Resource Include="Assets\ClassicWindowsIptvPlayer.ico" />
     <Resource Include="Assets\iptv-logo.png" />
+    <!-- Update edition: a Lite install downloads the Lite update, a Full install the Full update. -->
+    <AssemblyMetadata Include="UpdateEdition" Value="lite" Condition="'$(BundleVlc)' == 'false'" />
+    <AssemblyMetadata Include="UpdateEdition" Value="full" Condition="'$(BundleVlc)' != 'false'" />
     <Content Include="Assets\LiteStartHere.txt" Condition="'$(BundleVlc)' == 'false' and '$(SelfContained)' != 'true'"
              Link="Read Me First!!!.txt" CopyToPublishDirectory="Always" />
     <ProjectReference Include="..\ClassicWindowsIptvPlayer.Core\ClassicWindowsIptvPlayer.Core.csproj" /><ProjectReference Include="..\ClassicWindowsIptvPlayer.Updater\ClassicWindowsIptvPlayer.Updater.csproj" ReferenceOutputAssembly="false" />

@@ -50,7 +50,7 @@ public partial class UpdateWindow : Window
         var progress = new Progress<string>(message => { if (!_closed && ReferenceEquals(_downloadCancellation, cancellation)) DownloadStatusText.Text = message; });
         try
         {
-            StagedUpdate = await new UpdateDownloadService().StageAsync(_release.DisplayVersion, _currentVersion, AppDataPaths.Updates, progress, cancellation.Token);
+            StagedUpdate = await new UpdateDownloadService().StageAsync(_release.DisplayVersion, _currentVersion, GitHubUpdateService.Edition, AppDataPaths.Updates, progress, cancellation.Token);
             if (!_closed) SetReady();
         }
         catch (OperationCanceledException) { if (!_closed) { DownloadStatusText.Text = "Download canceled or timed out. Choose Retry update or open this release on GitHub."; UpdateButton.Content = "Retry update"; } }

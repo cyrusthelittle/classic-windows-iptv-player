@@ -10,9 +10,9 @@ public sealed class UpdateDownloadService
         _client = client ?? new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = Timeout.InfiniteTimeSpan };
         if (!_client.DefaultRequestHeaders.UserAgent.Any()) _client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("Classic-Windows-IPTV-Player", "1.0"));
     }
-    public async Task<StagedUpdate> StageAsync(string tag, Version currentVersion, string updatesRoot, IProgress<string>? progress = null, CancellationToken cancellationToken = default)
+    public async Task<StagedUpdate> StageAsync(string tag, Version currentVersion, string edition, string updatesRoot, IProgress<string>? progress = null, CancellationToken cancellationToken = default)
     {
-        AuthenticatedUpdate.ValidateTag(tag);
+        AuthenticatedUpdate.ValidateTag(tag); UpdateEdition.Validate(edition);
         AuthenticatedUpdate.RejectLinks(updatesRoot);
         Directory.CreateDirectory(updatesRoot);
         var stage = Path.Combine(updatesRoot, "stage-" + Guid.NewGuid().ToString("N"));
@@ -21,12 +21,11 @@ public sealed class UpdateDownloadService
         deadline.CancelAfter(TimeSpan.FromMinutes(15));
         try
         {
-            progress?.Report("Checking the update signature...");
-            await DownloadAsync(tag, AuthenticatedUpdate.ManifestName, Path.Combine(stage, AuthenticatedUpdate.ManifestName), 1048576, null, deadline.Token);
-            await DownloadAsync(tag, AuthenticatedUpdate.SignatureName, Path.Combine(stage, AuthenticatedUpdate.SignatureName), 1024, null, deadline.Token);
-            var manifest = AuthenticatedUpdate.VerifyManifest(await File.ReadAllBytesAsync(Path.Combine(stage, AuthenticatedUpdate.ManifestName), deadline.Token),
-                await File.ReadAllBytesAsync(Path.Combine(stage, AuthenticatedUpdate.SignatureName), deadline.Token), tag, currentVersion);
-            progress?.Report("Downloading the authenticated update...");
+            progress?.Report("Checking the update details...");
+            var manifestName = AuthenticatedUpdate.ManifestName(edition);
+            await DownloadAsync(tag, manifestName, Path.Combine(stage, manifestName), 1048576, null, deadline.Token);
+            var manifest = AuthenticatedUpdate.VerifyManifest(await File.ReadAllBytesAsync(Path.Combine(stage, manifestName), deadline.Token), tag, currentVersion, edition);
+            progress?.Report("Downloading the update...");
             await DownloadAsync(tag, manifest.Package, Path.Combine(stage, manifest.Package), manifest.PackageSize, progress, deadline.Token);
             progress?.Report("Verifying the download...");
             await Task.Run(() =>
@@ -59,16 +58,16 @@ public sealed class UpdateDownloadService
                 uri = location.IsAbsoluteUri ? location : new Uri(uri, location);
                 continue;
             }
-            if (response.StatusCode == HttpStatusCode.NotFound) throw new InvalidDataException("This release has no signed automatic-update package yet. Open this release on GitHub to download it manually.");
+            if (response.StatusCode == HttpStatusCode.NotFound) throw new InvalidDataException("This release has no automatic-update package for this edition. Open this release on GitHub to download it manually.");
             response.EnsureSuccessStatusCode();
-            if (response.Content.Headers.ContentLength > maximum) throw new InvalidDataException("The update download exceeded its signed size limit.");
+            if (response.Content.Headers.ContentLength > maximum) throw new InvalidDataException("The update download exceeded its size limit.");
             await using var body = await response.Content.ReadAsStreamAsync(token);
             await using var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, true);
             var bytes = new byte[65536]; long received = 0; int read;
             while ((read = await body.ReadAsync(bytes, token)) != 0)
             {
                 received += read;
-                if (received > maximum) throw new InvalidDataException("The update download exceeded its signed size limit.");
+                if (received > maximum) throw new InvalidDataException("The update download exceeded its size limit.");
                 await output.WriteAsync(bytes.AsMemory(0, read), token);
                 progress?.Report($"Downloading update: {received / (1024 * 1024)} MiB of {maximum / (1024 * 1024)} MiB");
             }
