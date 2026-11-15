@@ -38,7 +38,7 @@
             <MenuItem Header="View">
                 <MenuItem Header="Show / hide channels   Ctrl+L" Click="ToggleChannels_Click" />
                 <MenuItem Header="Full screen   F11" Click="FullScreen_Click" />
-                <MenuItem Header="Show diagnostics" IsCheckable="True" Click="ToggleDiagnostics_Click" />
+                <MenuItem x:Name="ShowDiagnosticsMenuItem" Header="Show diagnostics" IsCheckable="True" Click="ToggleDiagnostics_Click" />
             </MenuItem>
             <MenuItem Header="Playback">
                 <MenuItem Header="Play / pause   Space" Click="PlayPause_Click" />
@@ -54,7 +54,49 @@
                     <MenuItem Header="No audio tracks available" IsEnabled="False" />
                 </MenuItem>
             </MenuItem>
-            <MenuItem x:Name="SubtitleMenu" Header="Subtitles" />
+            <MenuItem x:Name="SubtitleMenu" Header="Subtitles">
+                <MenuItem x:Name="SubtitleBackgroundMenuItem" Header="Subtitle background" IsCheckable="True" Click="SubtitleBackgroundMenuItem_Click" />
+            </MenuItem>
+            <MenuItem x:Name="PictureMenu" Header="Picture" SubmenuOpened="PictureMenu_Opened">
+                <MenuItem Header="Video adjustments..." Click="VideoAdjustments_Click" />
+                <Separator />
+                <MenuItem x:Name="DeinterlaceMenu" Header="Deinterlacing (old TV channels)">
+                    <MenuItem Header="Automatic (VLC default)" Tag="deinterlace:default" Click="PictureOption_Click" />
+                    <MenuItem Header="Yadif: best quality" Tag="deinterlace:yadif" Click="PictureOption_Click" />
+                    <MenuItem Header="Yadif 2x: smoothest motion (sports), more CPU" Tag="deinterlace:yadif2x" Click="PictureOption_Click" />
+                    <MenuItem Header="Bob: lowest CPU" Tag="deinterlace:bob" Click="PictureOption_Click" />
+                    <MenuItem Header="Off" Tag="deinterlace:off" Click="PictureOption_Click" />
+                </MenuItem>
+                <MenuItem x:Name="UpscalingMenu" Header="Upscaling (GPU)">
+                    <MenuItem Header="Standard (default)" Tag="upscale:linear" Click="PictureOption_Click" />
+                    <MenuItem Header="GPU video processor (sharper on most graphics cards)" Tag="upscale:processor" Click="PictureOption_Click" />
+                    <MenuItem Header="AI Super Resolution (NVIDIA RTX 20 series or newer, Intel Arc)" Tag="upscale:super" Click="PictureOption_Click" />
+                </MenuItem>
+                <MenuItem x:Name="RtxHdrMenuItem" Header="SDR to HDR (NVIDIA RTX Video HDR, needs an HDR screen)" IsCheckable="True" Tag="rtxhdr" Click="PictureOption_Click" />
+                <Separator />
+                <MenuItem x:Name="DeblockMenu" Header="Reduce blockiness (deblocking, CPU)">
+                    <MenuItem Header="Off" Tag="deblock:0" Click="PictureOption_Click" />
+                    <MenuItem Header="Light" Tag="deblock:2" Click="PictureOption_Click" />
+                    <MenuItem Header="Medium" Tag="deblock:4" Click="PictureOption_Click" />
+                    <MenuItem Header="Strong" Tag="deblock:6" Click="PictureOption_Click" />
+                </MenuItem>
+                <MenuItem x:Name="DenoiseMenu" Header="Reduce noise (CPU)">
+                    <MenuItem Header="Off" Tag="denoise:0" Click="PictureOption_Click" />
+                    <MenuItem Header="Light" Tag="denoise:1" Click="PictureOption_Click" />
+                    <MenuItem Header="Medium" Tag="denoise:2" Click="PictureOption_Click" />
+                    <MenuItem Header="Strong" Tag="denoise:3" Click="PictureOption_Click" />
+                </MenuItem>
+                <MenuItem x:Name="DebandMenuItem" Header="Smooth color banding (CPU)" IsCheckable="True" Tag="deband" Click="PictureOption_Click" />
+                <MenuItem x:Name="SharpenMenu" Header="Sharpen (CPU)">
+                    <MenuItem Header="Off" Tag="sharpen:0" Click="PictureOption_Click" />
+                    <MenuItem Header="Light" Tag="sharpen:1" Click="PictureOption_Click" />
+                    <MenuItem Header="Medium" Tag="sharpen:2" Click="PictureOption_Click" />
+                    <MenuItem Header="Strong" Tag="sharpen:3" Click="PictureOption_Click" />
+                </MenuItem>
+                <Separator />
+                <MenuItem x:Name="PicturesOffMenuItem" Header="Turn all picture enhancements off" Tag="alloff" Click="PictureOption_Click" />
+                <MenuItem x:Name="PicturesOnMenuItem" Header="Turn picture enhancements back on (your last choices)" Tag="allon" Visibility="Collapsed" Click="PictureOption_Click" />
+            </MenuItem>
             <MenuItem Header="Settings" SubmenuOpened="SettingsMenu_Opened">
                 <MenuItem x:Name="BackgroundPlaylistRefreshMenuItem" Header="Update playlist in the background every time I open this account" IsCheckable="True" Click="ToggleBackgroundPlaylistRefresh_Click" />
                 <MenuItem Header="Open recordings folder" Click="ChooseRecordingFolder_Click" />
@@ -65,6 +107,9 @@
                 <MenuItem Header="Buffer 3 sec" Click="Buffer3_Click" />
                 <MenuItem Header="Buffer 6 sec" Click="Buffer6_Click" />
                 <MenuItem Header="Buffer 10 sec" Click="Buffer10_Click" />
+                    <Separator />
+                    <MenuItem x:Name="LiveRewindMenuItem" Header="Live pause buffer (record live channels locally)" IsCheckable="True" Click="ToggleLiveRewind_Click" />
+                    <MenuItem x:Name="HardwareDecodingMenuItem" Header="Hardware video decoding (GPU)" IsCheckable="True" Click="ToggleHardwareDecoding_Click" />
                     <Separator />
                     <MenuItem Header="Reconnect attempts">
                         <MenuItem Header="5 attempts" Click="Reconnect5_Click" />

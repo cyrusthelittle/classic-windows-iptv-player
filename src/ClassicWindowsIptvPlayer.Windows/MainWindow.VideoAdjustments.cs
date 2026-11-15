@@ -154,6 +154,7 @@ public partial class MainWindow
             var hue = Math.Clamp(_state.VideoHue, 0, 360);
             var gamma = (float)Math.Clamp(_state.VideoGamma, 0.5, 2);
             var neutral = brightness == 1 && contrast == 1 && saturation == 1 && hue == 0 && gamma == 1;
+            if (_tuner is not null) _tuner.VideoAdjustmentsActive = !neutral;
             if (neutral)
             {
                 player.SetAdjustInt(VideoAdjustOption.Enable, 0);

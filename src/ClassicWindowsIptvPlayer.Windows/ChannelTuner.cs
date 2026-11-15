@@ -47,8 +47,30 @@ public sealed record TimeshiftPlaybackSwitchResult(bool Success, long? SelectedS
 /// </summary>
 public sealed class ChannelTuner : IDisposable
 {
-    public bool TimeshiftEnabled { get; set; }
+    /// <summary>When false, live channels play the provider URL directly without the local pause buffer.</summary>
+    public bool TimeshiftEnabled { get; set; } = true;
+    /// <summary>Set by the host while non-neutral video adjustments (LibVLC's CPU "adjust" filter) are applied.</summary>
+    public bool VideoAdjustmentsActive { get; set; }
+    /// <summary>Second LibVLC engine started with the CPU picture enhancement filters, or null when none are on.</summary>
+    public LibVLC? FilteredLibVlc { get; set; }
+    /// <summary>Step 37: use the enhancement engine only for channels below 1080p.</summary>
+    public bool CpuEnhancementsOnlyBelowFullHd { get; set; }
     private int _timeshiftRetentionSeconds = 30;
+    // Which frozen-picture fallbacks each URL already used this session. Guarded by _gate.
+    private readonly StallFallbackPolicy _stallPolicy = new();
+    // Tune generation in which LibVLC reported DXGI_ERROR_DEVICE_REMOVED.
+    private int _videoDeviceLostGeneration = -1;
+    // The engine that created the active player; its Media objects must come from the same engine. Guarded by _gate.
+    private LibVLC? _activeInstance;
+    private static readonly TimeSpan RetirementStopTimeout = TimeSpan.FromSeconds(5);
+    // Players whose Stop never returned. They stay referenced and are never disposed:
+    // disposing would block on the same stuck native call.
+    private readonly List<(MediaPlayer Player, Media? Media)> _abandonedPlayers = new();
+    // Format of the active player's video, once LibVLC reports it. Guarded by _gate.
+    private VideoFormatInfo? _activeVideoFormat;
+    // Tune generation in which LibVLC last opened a hardware video decoder.
+    private int _hardwareDecoderGeneration = -1;
+    private const long VideoFormatProbeMs = 10000;
     private const int DefaultMaxAttempts = 10;
     private const int MaxAttemptsCeiling = 30;
     private static readonly TimeSpan OpenTimeout = TimeSpan.FromSeconds(15);
@@ -115,13 +137,43 @@ public sealed class ChannelTuner : IDisposable
     /// </summary>
     public event Action<MediaPlayer>? PlayerDetaching;
 
+    /// <summary>
+    /// Raised on the tuner worker thread just before a player that is being retired is
+    /// stopped. The host must stop calling into this player (properties, tracks, stats)
+    /// before returning, but must keep the video view bound until PlayerDetaching.
+    /// </summary>
+    public event Action<MediaPlayer>? PlayerStopping;
+
+    /// <summary>
+    /// Raised when LibVLC did not stop a player in time and the tuner gives up on it.
+    /// The player is still running inside the video surface, so the host must leave its
+    /// drawable alone (clearing it makes LibVLC open a top-level output window) and
+    /// move the next player to a fresh surface.
+    /// </summary>
+    public event Action<MediaPlayer>? PlayerAbandoning;
+
     /// <summary>Raised on arbitrary threads; the host marshals to its UI thread.</summary>
     public event Action<TunerStateSnapshot>? StateChanged;
+
+    /// <summary>Raised on arbitrary threads after video adjustments were turned off because the picture froze under them.</summary>
+    public event Action<TuneRequest>? VideoAdjustmentsSuspended;
+
+    /// <summary>Raised on arbitrary threads when a 4K/UHD channel still freezes after every fallback.</summary>
+    public event Action<TuneRequest>? UltraHdTooDemanding;
+
+    /// <summary>Raised on arbitrary threads after a channel was reopened without CPU picture enhancements.</summary>
+    public event Action<TuneRequest>? PictureEnhancementsSuspended;
 
     public ChannelTuner(LibVLC libVlc)
     {
         _libVlc = libVlc;
     }
+
+    /// <summary>Called by the host from LibVLC's log callback when a hardware video decoder was opened.</summary>
+    public void NotifyHardwareDecoderInUse() => Volatile.Write(ref _hardwareDecoderGeneration, Volatile.Read(ref _generation));
+
+    /// <summary>Called by the host from LibVLC's log callback on DXGI_ERROR_DEVICE_REMOVED (0x887A0005).</summary>
+    public void NotifyVideoDeviceLost() => Volatile.Write(ref _videoDeviceLostGeneration, Volatile.Read(ref _generation));
 
     /// <summary>The player of the newest tune attempt, or null when idle.</summary>
     public MediaPlayer? CurrentPlayer
@@ -302,11 +354,13 @@ public sealed class ChannelTuner : IDisposable
         ContinuousTimeshiftSource source, Uri url, long sequence, CancellationToken cancellationToken, bool preservePause = true)
     {
         Media? previousMedia;
+        var switchInstance = _libVlc;
         lock (_gate)
         {
             if (!ReferenceEquals(_activePlayer, player) || !ReferenceEquals(_activeFileSource, source) || _activeMedia is null)
                 return new(false, sequence, false, "The active channel changed before the timeshift switch began.");
             previousMedia = _activeMedia;
+            switchInstance = _activeInstance ?? _libVlc;
             _timeshiftSwitchingPlayer = player;
         }
 
@@ -315,7 +369,7 @@ public sealed class ChannelTuner : IDisposable
         var needsVideo = player.VoutCount > 0 || previousMedia.Tracks.Any(track => track.TrackType == TrackType.Video);
         try
         {
-            replacement = CreateTimeshiftMedia(url);
+            replacement = CreateTimeshiftMedia(url, switchInstance);
             StopPlayer(player);
             var started = await StartExistingPlayerInputAsync(player, replacement, cancellationToken).ConfigureAwait(false);
             if (started)
@@ -391,9 +445,9 @@ public sealed class ChannelTuner : IDisposable
         }
     }
 
-    private Media CreateTimeshiftMedia(Uri url)
+    private Media CreateTimeshiftMedia(Uri url, LibVLC instance)
     {
-        var media = new Media(_libVlc, url.AbsoluteUri, FromType.FromLocation);
+        var media = new Media(instance, url.AbsoluteUri, FromType.FromLocation);
         media.AddOption(":network-caching=200");
         media.AddOption(":live-caching=200");
         media.AddOption(":http-reconnect");
@@ -636,6 +690,28 @@ public sealed class ChannelTuner : IDisposable
         }
     }
 
+    /// <summary>Number of players LibVLC could not stop; their engine must never be disposed.</summary>
+    public int AbandonedPlayerCount { get { lock (_gate) return _abandonedPlayers.Count; } }
+
+    /// <summary>Lets channels that dropped picture enhancements after a freeze try the new settings.</summary>
+    public void ResetEnhancementFallbacks()
+    {
+        lock (_gate) _stallPolicy.ResetEnhancementFallbacks();
+    }
+
+    /// <summary>
+    /// Reopens the live channel that is playing now, so a changed picture engine takes
+    /// effect. Returns false (and does nothing) when no live channel is playing.
+    /// </summary>
+    public bool TryRestartCurrentLive()
+    {
+        TuneRequest? request;
+        lock (_gate) request = _activeRequest;
+        if (_disposed || request is not { IsLive: true }) return false;
+        Play(request);
+        return true;
+    }
+
     public void Stop()
     {
         if (_disposed) return;
@@ -771,6 +847,7 @@ public sealed class ChannelTuner : IDisposable
         var maxAttempts = MaxAttempts;
         var retryBudget = new TunerRetryBudget(maxAttempts);
         var vodPosition = new VodRecoveryPosition();
+        var deviceLostReopens = 0;
         while (retryBudget.CanAttempt)
         {
             var attempt = retryBudget.BeginAttempt();
@@ -784,11 +861,22 @@ public sealed class ChannelTuner : IDisposable
             ContinuousTimeshiftSource? fileSource = null;
             long? inputStartSequence = null;
             string? recordingOutputPath;
-            lock (_gate) recordingOutputPath = _recordingOutputPath;
+            bool directOnly, unadjusted, fastDecode, softwareDecode, useEnhancements;
+            var filteredVlc = FilteredLibVlc;
+            lock (_gate)
+            {
+                recordingOutputPath = _recordingOutputPath;
+                useEnhancements = _stallPolicy.ShouldUseEnhancements(request.Url, filteredVlc is not null,
+                    onlyBelowFullHd: CpuEnhancementsOnlyBelowFullHd);
+                directOnly = _stallPolicy.IsDirectOnly(request.Url);
+                unadjusted = _stallPolicy.IsUnadjusted(request.Url);
+                fastDecode = _stallPolicy.UsesFastDecode(request.Url);
+                softwareDecode = _stallPolicy.UsesSoftwareDecode(request.Url);
+            }
             try
             {
                 var mediaUrl = request.Url;
-                if (recordingOutputPath is null && request.IsLive)
+                if (recordingOutputPath is null && request.IsLive && TimeshiftEnabled && !directOnly)
                 {
                     try
                     {
@@ -810,11 +898,22 @@ public sealed class ChannelTuner : IDisposable
                     inputStartSequence = initialSequence;
                 }
 
-                media = new Media(_libVlc, mediaUrl, FromType.FromLocation);
+                var instance = useEnhancements ? filteredVlc! : _libVlc;
+                media = new Media(instance, mediaUrl, FromType.FromLocation);
                 media.AddOption(":network-caching=" + request.BufferMs);
                 media.AddOption(":live-caching=" + request.BufferMs);
                 media.AddOption(":file-caching=" + request.BufferMs);
                 media.AddOption(":http-reconnect");
+                if (fastDecode)
+                {
+                    // Skips the in-loop deblocking filter on every frame: much less CPU, slightly blockier picture.
+                    media.AddOption(":avcodec-skiploopfilter=4");
+                    media.AddOption(":avcodec-fast");
+                }
+                if (softwareDecode) media.AddOption(":avcodec-hw=none");
+                if (fastDecode || softwareDecode)
+                    AppLogger.Info("Tuner: lighter 4K decoding for this channel. fastDecode=" + fastDecode +
+                        "; softwareDecode=" + softwareDecode + "; channel=" + request.ChannelName);
                 if (recordingOutputPath is not null)
                 {
                     var muxer = Path.GetExtension(recordingOutputPath).Equals(".mkv", StringComparison.OrdinalIgnoreCase) ? "mkv" : "ts";
@@ -822,13 +921,22 @@ public sealed class ChannelTuner : IDisposable
                         EscapeSoutPath(recordingOutputPath) + "'}}");
                     media.AddOption(":sout-all");
                 }
-                player = new MediaPlayer(_libVlc)
+                player = new MediaPlayer(instance)
                 {
                     // LibVLC's own video output consumes mouse/keyboard input before
                     // the host window sees it; the host does its own input handling.
                     EnableMouseInput = false,
                     EnableKeyInput = false
                 };
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // A newer tune or Stop superseded this one while the recording was starting.
+                if (fileSource is not null)
+                {
+                    try { await fileSource.DisposeAsync().ConfigureAwait(false); } catch { }
+                }
+                return;
             }
             catch (Exception ex)
             {
@@ -860,6 +968,8 @@ public sealed class ChannelTuner : IDisposable
                     _lastLivePlayerTimeMs = null;
                     _livePositionClockFallback = false;
                     _activeRequest = request;
+                    _activeVideoFormat = null;
+                    _activeInstance = useEnhancements ? filteredVlc : _libVlc;
                     installed = true;
                 }
             }
@@ -876,9 +986,11 @@ public sealed class ChannelTuner : IDisposable
             // old player down only after native callback cleanup has completed.
             if (oldPlayer is not null)
             {
-                StopPlayer(oldPlayer);
+                var oldStopped = StopPlayerForRetirement(oldPlayer);
+                if (!oldStopped) RaiseAbandoning(oldPlayer);
                 RaiseDetaching(oldPlayer);
-                Retire(oldPlayer, oldMedia);
+                if (oldStopped) Retire(oldPlayer, oldMedia);
+                else Abandon(oldPlayer, oldMedia);
             }
 
             try
@@ -891,6 +1003,11 @@ public sealed class ChannelTuner : IDisposable
                 await ReleaseAttemptAsync(player, media, fileSource).ConfigureAwait(false);
                 RaiseState(new TunerStateSnapshot(TunerStatus.Failed, request, attempt, maxAttempts, "The embedded video surface is unavailable."));
                 return;
+            }
+            // The host has just applied the saved adjustments; keep them off where they froze the picture.
+            if (unadjusted)
+            {
+                try { player.SetAdjustInt(VideoAdjustOption.Enable, 0); } catch { }
             }
 
             // The previous cycle owns and retires its own player after its native
@@ -910,12 +1027,93 @@ public sealed class ChannelTuner : IDisposable
                 AppLogger.Info("Tuner: playing. generation=" + generation + "; attempt=" + attempt + "; channel=" + request.ChannelName);
 
                 var playingSince = DateTime.UtcNow;
-                var end = await MonitorAsync(player, cancellationToken,
-                    request.IsLive ? null : vodPosition).ConfigureAwait(false);
+                // Recording keeps its own input path, so only ordinary live playback can fall back.
+                var watchForStall = request.IsLive && recordingOutputPath is null;
+                var end = await MonitorAsync(player, media, generation, cancellationToken,
+                    request.IsLive ? null : vodPosition, watchForStall ? new VideoStallDetector() : null,
+                    format => OnVideoFormatKnown(request, format, useEnhancements, recordingOutputPath is not null)).ConfigureAwait(false);
+                if (end == StreamEnd.ReopenRequested)
+                {
+                    await ReleaseAttemptAsync(player, media, fileSource).ConfigureAwait(false);
+                    retryBudget.RefundAttempt();
+                    continue;
+                }
+                if (end == StreamEnd.VideoDeviceLost)
+                {
+                    Interlocked.CompareExchange(ref _videoDeviceLostGeneration, -1, generation);
+                    if (++deviceLostReopens <= 2)
+                    {
+                        AppLogger.Warn("Tuner: the graphics device was reset (DXGI device removed); reopening the channel. generation=" +
+                            generation + "; channel=" + request.ChannelName);
+                        await ReleaseAttemptAsync(player, media, fileSource).ConfigureAwait(false);
+                        retryBudget.RefundAttempt();
+                        continue;
+                    }
+                    AppLogger.Warn("Tuner: the graphics device keeps resetting; leaving playback running. channel=" + request.ChannelName);
+                    end = await MonitorAsync(player, media, generation, cancellationToken, request.IsLive ? null : vodPosition).ConfigureAwait(false);
+                    if (end == StreamEnd.VideoDeviceLost) end = StreamEnd.Error;
+                }
+                string? stallFallback = null;
+                var stallDecision = new StallDecision(StallFallback.None, false, false);
+                if (end == StreamEnd.VideoStalled)
+                {
+                    VideoFormatInfo? format;
+                    bool softwareDecodeNext;
+                    lock (_gate)
+                    {
+                        // CPU filters (LibVLC's "adjust", picture enhancements) can make every frame
+                        // of a demanding stream miss its display time; a fresh player without them
+                        // plays at full rate, unlike disabling them in place.
+                        format = _activeVideoFormat;
+                        stallDecision = _stallPolicy.Decide(request.Url,
+                            aboveFullHd: format is { IsAboveFullHd: true },
+                            hardwareDecoderUsed: Volatile.Read(ref _hardwareDecoderGeneration) == generation,
+                            adjustmentsActive: VideoAdjustmentsActive,
+                            enhancementsActive: useEnhancements,
+                            remuxed: fileSource is not null);
+                        softwareDecodeNext = _stallPolicy.UsesSoftwareDecode(request.Url);
+                    }
+                    stallFallback = stallDecision.Action switch
+                    {
+                        StallFallback.FastDecode => softwareDecodeNext
+                            ? "reopening it with fast software decoding for 4K"
+                            : "reopening it with fast decoding for 4K",
+                        StallFallback.WithoutAdjustments => "reopening it without video adjustments",
+                        StallFallback.WithoutEnhancements => "reopening it without picture enhancements",
+                        StallFallback.Direct => "reopening it directly",
+                        _ => null
+                    };
+                    AppLogger.Warn("Tuner: picture froze while audio continued; " + (stallFallback ?? "no further fallback, leaving playback running") +
+                        ". generation=" + generation + "; channel=" + request.ChannelName +
+                        (format is null ? string.Empty : "; " + format.Describe()));
+                    if (stallDecision.Action == StallFallback.WarnUltraHd)
+                    {
+                        try { UltraHdTooDemanding?.Invoke(request); }
+                        catch (Exception ex) { AppLogger.Error("Tuner: UltraHdTooDemanding handler failed.", ex); }
+                    }
+                    if (stallFallback is null) end = await MonitorAsync(player, media, generation, cancellationToken, null).ConfigureAwait(false);
+                }
                 if (!IsCurrent(generation) || cancellationToken.IsCancellationRequested)
                 {
                     await ReleaseAttemptAsync(player, media, fileSource).ConfigureAwait(false);
                     return;
+                }
+
+                if (stallFallback is not null)
+                {
+                    await ReleaseAttemptAsync(player, media, fileSource).ConfigureAwait(false);
+                    if (stallDecision.AdjustmentsSuspended)
+                    {
+                        try { VideoAdjustmentsSuspended?.Invoke(request); }
+                        catch (Exception ex) { AppLogger.Error("Tuner: VideoAdjustmentsSuspended handler failed.", ex); }
+                    }
+                    if (stallDecision.EnhancementsSuspended)
+                    {
+                        try { PictureEnhancementsSuspended?.Invoke(request); }
+                        catch (Exception ex) { AppLogger.Error("Tuner: PictureEnhancementsSuspended handler failed.", ex); }
+                    }
+                    retryBudget.RefundAttempt();
+                    continue;
                 }
 
                 if (PlaybackCompletionPolicy.IsNormalVodCompletion(request.IsLive, end == StreamEnd.EndedNormally))
@@ -938,7 +1136,7 @@ public sealed class ChannelTuner : IDisposable
                     while (_userPaused && !cancellationToken.IsCancellationRequested)
                         await Task.Delay(100, CancellationToken.None).ConfigureAwait(false);
                     if (!cancellationToken.IsCancellationRequested && player.IsPlaying)
-                        await MonitorAsync(player, cancellationToken, null).ConfigureAwait(false);
+                        await MonitorAsync(player, media, generation, cancellationToken, null).ConfigureAwait(false);
                 }
                 var duration = DateTime.UtcNow - playingSince;
                 playedFor = duration;
@@ -1012,7 +1210,12 @@ public sealed class ChannelTuner : IDisposable
     {
         Error,
         EndedNormally,
-        StoppedExternally
+        StoppedExternally,
+        VideoStalled,
+        // The format callback asked to reopen the channel (Step 37 uses this).
+        ReopenRequested,
+        // The GPU reported DXGI_ERROR_DEVICE_REMOVED; this video output cannot recover.
+        VideoDeviceLost
     }
 
     /// <summary>
@@ -1020,8 +1223,8 @@ public sealed class ChannelTuner : IDisposable
     /// a player always calls Stop first, so this completes for superseded
     /// players too and never leaks.
     /// </summary>
-    private async Task<StreamEnd> MonitorAsync(MediaPlayer player, CancellationToken cancellationToken,
-        VodRecoveryPosition? vodPosition)
+    private async Task<StreamEnd> MonitorAsync(MediaPlayer player, Media media, int generation, CancellationToken cancellationToken,
+        VodRecoveryPosition? vodPosition, VideoStallDetector? stallDetector = null, Func<VideoFormatInfo, bool>? onVideoFormat = null)
     {
         var outcome = new TaskCompletionSource<StreamEnd>(TaskCreationOptions.RunContinuationsAsynchronously);
         void OnError(object? s, EventArgs e) { if (!IsTimeshiftSwitchInProgress(player)) outcome.TrySetResult(StreamEnd.Error); }
@@ -1040,8 +1243,32 @@ public sealed class ChannelTuner : IDisposable
             var recoveryTarget = vodPosition?.RecoveryTargetMs;
             var seekDeadline = DateTime.UtcNow.AddSeconds(4);
             var awaitingSeekConfirmationMs = 0L;
+            var monitorStarted = Environment.TickCount64;
+            var nextStallSample = monitorStarted;
+            var nextFormatSample = monitorStarted;
+            var videoFormatReported = false;
             while (!outcome.Task.IsCompleted)
             {
+                if (stallDetector is not null && Environment.TickCount64 >= nextStallSample)
+                {
+                    nextStallSample = Environment.TickCount64 + 1000;
+                    if (SampleVideoStall(player, stallDetector, Environment.TickCount64 - monitorStarted))
+                        outcome.TrySetResult(StreamEnd.VideoStalled);
+                }
+
+                if (onVideoFormat is not null && !videoFormatReported && Environment.TickCount64 >= nextFormatSample &&
+                    Environment.TickCount64 - monitorStarted <= VideoFormatProbeMs)
+                {
+                    nextFormatSample = Environment.TickCount64 + 500;
+                    if (TryReadVideoFormat(media) is { } format)
+                    {
+                        videoFormatReported = true;
+                        if (onVideoFormat(format)) outcome.TrySetResult(StreamEnd.ReopenRequested);
+                    }
+                }
+                if (Volatile.Read(ref _videoDeviceLostGeneration) == generation && Environment.TickCount64 - monitorStarted >= 1000)
+                    outcome.TrySetResult(StreamEnd.VideoDeviceLost);
+
                 if (player.State == VLCState.Error && !IsTimeshiftSwitchInProgress(player)) outcome.TrySetResult(StreamEnd.Error);
                 else if (player.State == VLCState.Stopped && !IsTimeshiftSwitchInProgress(player))
                     outcome.TrySetResult(StreamEnd.StoppedExternally);
@@ -1086,6 +1313,69 @@ public sealed class ChannelTuner : IDisposable
         }
     }
 
+    private static VideoFormatInfo? TryReadVideoFormat(Media media)
+    {
+        try
+        {
+            foreach (var track in media.Tracks)
+            {
+                if (track.TrackType != TrackType.Video) continue;
+                var video = track.Data.Video;
+                var format = VideoFormatInfo.Create(track.Codec, video.Width, video.Height, track.Profile, video.FrameRateNum, video.FrameRateDen);
+                if (format is not null) return format;
+            }
+        }
+        catch
+        {
+            // Tracks are not ready yet, or native teardown raced the read.
+        }
+        return null;
+    }
+
+    // Records and logs the format. Returns true to reopen the channel on the enhancement engine.
+    private bool OnVideoFormatKnown(TuneRequest request, VideoFormatInfo format, bool attemptUsedEnhancements, bool recording)
+    {
+        bool reopen;
+        lock (_gate)
+        {
+            if (ReferenceEquals(_activeRequest, request)) _activeVideoFormat = format;
+            reopen = _stallPolicy.ShouldReopenWithEnhancements(request.Url, format, FilteredLibVlc is not null,
+                CpuEnhancementsOnlyBelowFullHd, attemptUsedEnhancements, recording);
+        }
+        AppLogger.Info("Tuner: video format. " + format.Describe() + (format.IsLikely10BitHevc ? "; 10-bit HEVC" : string.Empty) +
+            "; channel=" + request.ChannelName);
+        if (reopen)
+            AppLogger.Info("Tuner: channel is below 1080p; reopening it with picture enhancements. channel=" + request.ChannelName);
+        return reopen;
+    }
+
+    private bool SampleVideoStall(MediaPlayer player, VideoStallDetector detector, long playingForMs)
+    {
+        Media? media;
+        lock (_gate) media = ReferenceEquals(_activePlayer, player) && !ReferenceEquals(_timeshiftSwitchingPlayer, player) ? _activeMedia : null;
+        if (media is null || _userPaused || player.State != VLCState.Playing)
+        {
+            detector.Reset();
+            return false;
+        }
+
+        try
+        {
+            var stats = media.Statistics;
+            var hasVideo = stats.DecodedVideo > 0 || player.VideoTrackCount > 0;
+            if (!detector.Observe(playingForMs, hasVideo, stats.DisplayedPictures, stats.DecodedAudio)) return false;
+            AppLogger.Info("Tuner: video stall counters. decodedVideo=" + stats.DecodedVideo + "; displayed=" + stats.DisplayedPictures +
+                "; lost=" + stats.LostPictures + "; decodedAudio=" + stats.DecodedAudio);
+            return true;
+        }
+        catch
+        {
+            // Native teardown can race a statistics sample.
+            detector.Reset();
+            return false;
+        }
+    }
+
     private bool IsTimeshiftSwitchInProgress(MediaPlayer player)
     {
         lock (_gate) return ReferenceEquals(_timeshiftSwitchingPlayer, player);
@@ -1111,7 +1401,7 @@ public sealed class ChannelTuner : IDisposable
         // Callback subscriptions have already been removed when this is called.
         // Stop while the drawable is still attached; clearing a live player's
         // HWND lets LibVLC fall back to a top-level Direct3D11 output window.
-        StopPlayer(player);
+        var stopped = StopPlayerForRetirement(player);
 
         var wasActive = false;
         Media ownedMedia = media;
@@ -1126,12 +1416,15 @@ public sealed class ChannelTuner : IDisposable
                 _activeMedia = null;
                 _activeFileSource = null;
                 _activeRequest = null;
+                _activeInstance = null;
                 wasActive = true;
             }
         }
 
+        if (wasActive && !stopped) RaiseAbandoning(player);
         if (wasActive) RaiseDetaching(player);
-        Retire(player, ownedMedia);
+        if (stopped) Retire(player, ownedMedia);
+        else Abandon(player, ownedMedia);
         if (ownedSource is not null)
         {
             try { await ownedSource.DisposeAsync().ConfigureAwait(false); }
@@ -1154,6 +1447,33 @@ public sealed class ChannelTuner : IDisposable
     {
         try { player.Stop(); }
         catch (Exception ex) { AppLogger.Warn("Tuner: player Stop failed. " + AppLogger.SanitizeText(ex.Message)); }
+    }
+
+    // Stops a player that is about to be retired. The host first drops its own
+    // references (PlayerStopping) so the UI thread cannot be inside a call to this
+    // player while LibVLC waits for the video output, which needs the UI thread.
+    private bool StopPlayerForRetirement(MediaPlayer player)
+    {
+        try { PlayerStopping?.Invoke(player); }
+        catch (Exception ex) { AppLogger.Error("Tuner: PlayerStopping handler failed.", ex); }
+
+        var stopped = BoundedNativeCall.Run(() => player.Stop(), RetirementStopTimeout,
+            ex => AppLogger.Warn("Tuner: player Stop failed. " + AppLogger.SanitizeText(ex.Message)));
+        if (!stopped)
+            AppLogger.Warn("Tuner: LibVLC did not stop the previous player within " + RetirementStopTimeout.TotalSeconds +
+                " s; abandoning it so the app stays responsive.");
+        return stopped;
+    }
+
+    private void Abandon(MediaPlayer player, Media? media)
+    {
+        lock (_gate) _abandonedPlayers.Add((player, media));
+    }
+
+    private void RaiseAbandoning(MediaPlayer player)
+    {
+        try { PlayerAbandoning?.Invoke(player); }
+        catch (Exception ex) { AppLogger.Error("Tuner: PlayerAbandoning handler failed.", ex); }
     }
 
     private void RaiseDetaching(MediaPlayer player)

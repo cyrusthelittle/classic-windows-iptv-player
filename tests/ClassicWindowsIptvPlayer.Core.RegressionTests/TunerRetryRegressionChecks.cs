@@ -59,6 +59,50 @@ internal static class TunerRetryRegressionChecks
                 oldTuneToken.Cancel();
                 Equal(false, await pending.WaitAsync(TimeSpan.FromSeconds(2)));
                 Equal(false, await TunerRetryBudget.WaitForRetryAsync(0, CancellationToken.None, () => generation == 1));
+            }),
+            ("switching playback path refunds the attempt without exceeding the budget", () =>
+            {
+                var budget = new TunerRetryBudget(1);
+                Equal(1, budget.BeginAttempt());
+                Equal(false, budget.CanAttempt);
+                budget.RefundAttempt();
+                Equal(true, budget.CanAttempt);
+                Equal(1, budget.BeginAttempt());
+                budget.RefundAttempt();
+                budget.RefundAttempt();
+                Equal(1, budget.BeginAttempt());
+                return Task.CompletedTask;
+            }),
+            ("frozen picture with advancing audio is detected after one window", () =>
+            {
+                var detector = new VideoStallDetector();
+                // Last picture shown at 4s; audio keeps decoding afterwards.
+                var stalled = false;
+                for (long ms = 0; ms <= 16_000 && !stalled; ms += 1000)
+                    stalled = detector.Observe(ms, hasVideo: true, displayedPictures: ms <= 4000 ? (int)(ms / 40) : 100, decodedAudio: (int)(ms / 21));
+                Equal(true, stalled);
+                return Task.CompletedTask;
+            }),
+            ("healthy video, audio-only and paused audio are never reported as frozen", () =>
+            {
+                foreach (var (hasVideo, fps, audioAdvances) in new[] { (true, 25, true), (true, 1, true), (false, 0, true), (true, 0, false) })
+                {
+                    var detector = new VideoStallDetector();
+                    for (long ms = 0; ms <= 60_000; ms += 1000)
+                        if (detector.Observe(ms, hasVideo, (int)(ms / 1000 * fps), audioAdvances ? (int)(ms / 21) : 50))
+                            throw new InvalidOperationException($"False stall: hasVideo={hasVideo}; fps={fps}; audio={audioAdvances}.");
+                }
+                return Task.CompletedTask;
+            }),
+            ("stall detection waits for the startup grace and restarts with new media", () =>
+            {
+                var detector = new VideoStallDetector();
+                Equal(false, detector.Observe(1000, true, 0, 100));
+                Equal(false, detector.Observe(VideoStallDetector.GraceMs, true, 0, 200));
+                // Counters reset because a timeshift seek replaced the media: a new window starts.
+                Equal(false, detector.Observe(VideoStallDetector.GraceMs + VideoStallDetector.WindowMs, true, 0, 10));
+                Equal(true, detector.Observe(VideoStallDetector.GraceMs + 2 * VideoStallDetector.WindowMs, true, 0, 400));
+                return Task.CompletedTask;
             })
         };
 

@@ -19,6 +19,12 @@ internal sealed class TunerRetryBudget(int maxAttempts)
         return ++_attempt;
     }
 
+    /// <summary>Returns an attempt that ended by switching playback path rather than failing.</summary>
+    internal void RefundAttempt()
+    {
+        if (_attempt > 0) _attempt--;
+    }
+
     /// <summary>Returns null when the budget is exhausted; a healthy stream starts a new budget.</summary>
     internal int? NextDelayMs(TimeSpan? playedFor)
     {

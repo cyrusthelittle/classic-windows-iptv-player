@@ -267,6 +267,7 @@ public sealed class AppState
     // when a decoded track advertises a recognizable language.
     public string PreferredAudioLanguage { get; set; } = string.Empty;
     public string PreferredSubtitleLanguage { get; set; } = string.Empty;
+    public bool SubtitleBackgroundEnabled { get; set; } = true;
 
     // Shared transparency for the auto-hide controls panel and volume OSD.
     // Range: 0.0 (fully transparent) .. 1.0 (fully opaque)
@@ -274,13 +275,31 @@ public sealed class AppState
 
     // UI theme. Light stays the default so existing installs keep their look.
     public bool DarkMode { get; set; } = false;
+    public bool ShowDiagnostics { get; set; } = false;
 
     // EPG is opt-in because some providers expose very large or unreliable XMLTV feeds.
     public bool EpgEnabled { get; set; } = false;
 
-    // Default destination for recordings.
+    // The live pause buffer re-records live channels locally; off plays the provider URL directly.
     public bool TimeshiftEnabled { get; set; } = true;
     public int TimeshiftSeconds { get; set; } = 30;
+
+    // GPU (D3D11/DXVA) video decoding. Applied when the player engine starts.
+    public bool HardwareDecodingEnabled { get; set; } = true;
+
+    // Picture quality options (Picture menu). Applied when the player engine starts.
+    // Values outside the listed sets are treated as the default.
+    public string DeinterlaceMode { get; set; } = "default";   // default | off | yadif | yadif2x | bob
+    public string UpscaleMode { get; set; } = "linear";        // linear | processor | super
+    public bool RtxHdrEnabled { get; set; }
+    public int DeblockQuality { get; set; }                    // 0 off, 2 light, 4 medium, 6 strong
+    public int DenoiseLevel { get; set; }                      // 0 off, 1 light, 2 medium, 3 strong
+    public bool DebandEnabled { get; set; }
+    public int SharpenLevel { get; set; }                      // 0 off, 1 light, 2 medium, 3 strong
+    public bool PictureEnhancementsOff { get; set; }           // "Turn all off" is selected; the choices above are kept
+    public bool EnhanceOnlyBelowFullHd { get; set; } = false;   // unused: CPU enhancements apply to every channel
+
+    // Default destination for recordings.
     public string RecordingFolder { get; set; } = string.Empty;
 
     // Update checks are enabled by default. Users can turn them off from the

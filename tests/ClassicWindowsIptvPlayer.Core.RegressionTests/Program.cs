@@ -12,6 +12,7 @@ if (args.Contains("--prepared-library")) return PreparedLibraryRegressionChecks.
 if (args.Contains("--authenticated-update")) return await AuthenticatedUpdateRegressionChecks.RunAsync();
 if (args.Contains("--update-release")) return await UpdateReleaseRegressionChecks.RunAsync();
 if (args.Contains("--background-refresh")) return BackgroundRefreshRegressionChecks.Run();
+if (args.Contains("--playback-quality")) return PlaybackQualityRegressionChecks.Run();
 
 Environment.SetEnvironmentVariable("CYRUS_IPTV_DATA_ROOT", Path.Combine(Path.GetTempPath(), "cyrus-core-isolated-" + Guid.NewGuid().ToString("N")));
 var authenticatedUpdateResult = await AuthenticatedUpdateRegressionChecks.RunAsync();
@@ -41,7 +42,8 @@ var recordingResult = RecordingRegressionChecks.Run();
 var sharedHlsResult = SharedHlsSourceRegressionChecks.Run();
 var feedbackOutboxResult = await FeedbackOutboxRegressionChecks.RunAsync();
 var crashSessionMarkerResult = CrashSessionMarkerRegressionChecks.Run();
-return authenticatedUpdateResult == 0 && dataMigrationResult == 0 && updateReleaseResult == 0 && backgroundRefreshResult == 0 && preparedLibraryResult == 0 && epgResult == 0 && tunerResult == 0 && diagnosticsResult == 0 && playbackBrowseResult == 0 && storageResult == 0 && accountEditingResult == 0 && providerResult == 0 && playbackMechanicsResult == 0 && libraryNavigationResult == 0 && largeLibraryResult == 0 && guideFoundationResult == 0 && guideGridResult == 0 && viewingHistoryResult == 0 && playbackPreferenceResult == 0 && videoOwnershipResult == 0 && organizationResult == 0 && catchupResult == 0 && recordingResult == 0 && sharedHlsResult == 0 && feedbackOutboxResult == 0 && crashSessionMarkerResult == 0 ? 0 : 1;
+var playbackQualityResult = PlaybackQualityRegressionChecks.Run();
+return authenticatedUpdateResult == 0 && dataMigrationResult == 0 && updateReleaseResult == 0 && backgroundRefreshResult == 0 && preparedLibraryResult == 0 && epgResult == 0 && tunerResult == 0 && diagnosticsResult == 0 && playbackBrowseResult == 0 && storageResult == 0 && accountEditingResult == 0 && providerResult == 0 && playbackMechanicsResult == 0 && libraryNavigationResult == 0 && largeLibraryResult == 0 && guideFoundationResult == 0 && guideGridResult == 0 && viewingHistoryResult == 0 && playbackPreferenceResult == 0 && videoOwnershipResult == 0 && organizationResult == 0 && catchupResult == 0 && recordingResult == 0 && sharedHlsResult == 0 && feedbackOutboxResult == 0 && crashSessionMarkerResult == 0 && playbackQualityResult == 0 ? 0 : 1;
 
 internal static class EpgRegressionChecks
 {

@@ -14,7 +14,8 @@ to another machine does not yield usable credentials.
 
 ## Why it is committed
 
-It is deliberately tracked, and `scripts\BUILD_WINDOWS_RELEASE.bat` copies it
+It is deliberately tracked, and both `scripts\BUILD_WINDOWS_FULL.bat` and
+`scripts\BUILD_WINDOWS_LITE.bat` copy it
 into the release output. The tradeoff was accepted knowingly: the accounts are
 free-to-air, the file is opaque, and the convenience of a working first launch
 was judged worth it.
@@ -25,7 +26,7 @@ by replacing this file and rebuilding.
 
 ## Release copies
 
-The file is seeded into the selected `release\full\` or `release\light\` output
+The file is seeded into the selected `release\full\` or `release\lite\` output
 when account settings are missing. `release\` is gitignored, so only the copy in
 this fixture folder is tracked. Rebuilding preserves existing account settings.
 

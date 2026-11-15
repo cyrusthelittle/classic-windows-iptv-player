@@ -74,6 +74,25 @@ public partial class MainWindow
             }
         }
         DarkModeMenuItem.IsChecked = _state.DarkMode;
+        LiveRewindMenuItem.IsChecked = _state.TimeshiftEnabled;
+        HardwareDecodingMenuItem.IsChecked = _state.HardwareDecodingEnabled;
+    }
+
+    private void ToggleLiveRewind_Click(object sender, RoutedEventArgs e)
+    {
+        _state.TimeshiftEnabled = LiveRewindMenuItem.IsChecked;
+        _store.Save(_state);
+        if (_tuner is not null) _tuner.TimeshiftEnabled = _state.TimeshiftEnabled;
+        StatusText.Text = _state.TimeshiftEnabled
+            ? "Live pause buffer enabled. It applies to the next live channel you open."
+            : "Live pause buffer disabled. Live channels will play the provider stream directly.";
+    }
+
+    private void ToggleHardwareDecoding_Click(object sender, RoutedEventArgs e)
+    {
+        _state.HardwareDecodingEnabled = HardwareDecodingMenuItem.IsChecked;
+        _store.Save(_state);
+        StatusText.Text = "Hardware video decoding " + (_state.HardwareDecodingEnabled ? "enabled" : "disabled") + ". Restart the app to apply.";
     }
 
     private void RemoteControlMenuItem_Click(object sender, RoutedEventArgs e)

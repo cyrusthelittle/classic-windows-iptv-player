@@ -8,6 +8,12 @@
   <ItemGroup>
     <ProjectReference Include="../../src/ClassicWindowsIptvPlayer.Core/ClassicWindowsIptvPlayer.Core.csproj" />
     <Compile Include="../../src/ClassicWindowsIptvPlayer.Windows/TunerRetryBudget.cs" Link="TunerRetryBudget.cs" />
+    <Compile Include="../../src/ClassicWindowsIptvPlayer.Windows/VideoStallDetector.cs" Link="VideoStallDetector.cs" />
+    <Compile Include="../../src/ClassicWindowsIptvPlayer.Windows/BoundedNativeCall.cs" Link="BoundedNativeCall.cs" />
+    <Compile Include="../../src/ClassicWindowsIptvPlayer.Windows/VideoFormatInfo.cs" Link="VideoFormatInfo.cs" />
+    <Compile Include="../../src/ClassicWindowsIptvPlayer.Windows/RepeatedLogFilter.cs" Link="RepeatedLogFilter.cs" />
+    <Compile Include="../../src/ClassicWindowsIptvPlayer.Windows/StallFallbackPolicy.cs" Link="StallFallbackPolicy.cs" />
+    <Compile Include="../../src/ClassicWindowsIptvPlayer.Windows/PictureEnhancementOptions.cs" Link="PictureEnhancementOptions.cs" />
     <Compile Include="../../src/ClassicWindowsIptvPlayer.Windows/PlaybackBrowseState.cs" Link="PlaybackBrowseState.cs" />
     <Compile Include="../../src/ClassicWindowsIptvPlayer.Windows/VodRecoveryPosition.cs" Link="VodRecoveryPosition.cs" />
     <Compile Include="../../src/ClassicWindowsIptvPlayer.Windows/LibraryNavigationPolicy.cs" Link="LibraryNavigationPolicy.cs" />

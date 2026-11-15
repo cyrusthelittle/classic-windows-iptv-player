@@ -47,7 +47,18 @@ public partial class MainWindow : Window
     private readonly StreamInfoTracker _streamInfoTracker = new();
     private readonly GitHubUpdateService _updateService = new();
     private FeedbackOutbox _feedbackOutbox = null!;
-    private readonly LibVLCSharp.WinForms.VideoView _videoView = new()
+    private LibVLCSharp.WinForms.VideoView _videoView = CreateVideoView();
+    // Holds every video surface. A surface whose player LibVLC could not stop is kept
+    // here, hidden and still bound to that player, and never disposed or detached.
+    private readonly System.Windows.Forms.Panel _videoPanel = new()
+    {
+        BackColor = System.Drawing.Color.Black,
+        Dock = System.Windows.Forms.DockStyle.Fill,
+        TabStop = false
+    };
+    private readonly List<LibVLCSharp.WinForms.VideoView> _parkedVideoViews = [];
+
+    private static LibVLCSharp.WinForms.VideoView CreateVideoView() => new()
     {
         BackColor = System.Drawing.Color.Black,
         Dock = System.Windows.Forms.DockStyle.Fill,
@@ -221,6 +232,10 @@ public partial class MainWindow : Window
 
     private LibVLC? _libVlc;
     private MediaPlayer? _mediaPlayer;
+    // The player the tuner is stopping right now; only its Stopped event may still update the UI.
+    private MediaPlayer? _stoppingPlayer;
+    // Second LibVLC engine with the CPU picture enhancement filters (null when none are on).
+    private LibVLC? _filteredLibVlc;
     private Media? _currentMedia;
     private MediaSearchIndex? _searchIndex;
     private EpgGuide? _epgGuide;
@@ -346,6 +361,9 @@ public partial class MainWindow : Window
         };
         InitializeVideoSurface();
         DarkModeMenuItem.IsChecked = _state.DarkMode;
+        ShowDiagnosticsMenuItem.IsChecked = _state.ShowDiagnostics;
+        StreamInfoText.Visibility = _state.ShowDiagnostics ? Visibility.Visible : Visibility.Collapsed;
+        SubtitleBackgroundMenuItem.IsChecked = _state.SubtitleBackgroundEnabled;
         EpgEnabledMenuItem.IsChecked = _state.EpgEnabled;
         UpdateChecksMenuItem.IsChecked = _state.CheckForUpdatesOnStartup;
         AutomaticUpdateDownloadMenuItem.IsChecked = _state.DownloadUpdatesAutomatically;
@@ -484,24 +502,61 @@ public partial class MainWindow : Window
         }
     }
 
+    private readonly RepeatedLogFilter _libVlcLogFilter = new();
+
+    // LibVLC calls this on its own threads, often several at the same time.
+    private void OnLibVlcLog(object? sender, LogEventArgs e)
+    {
+        var message = e.Message ?? string.Empty;
+        var module = e.Module ?? "core";
+
+        // Which decoder LibVLC picked, e.g. "Using D3D11VA (Intel(R) HD Graphics 520, ...) for hardware decoding".
+        if (message.StartsWith("Using ", StringComparison.Ordinal) &&
+            message.Contains("for hardware decoding", StringComparison.OrdinalIgnoreCase))
+        {
+            if (_libVlcLogFilter.ShouldLog(module + ": " + message, Environment.TickCount64, out _))
+                AppLogger.Info("libvlc " + module + ": " + message);
+            _tuner?.NotifyHardwareDecoderInUse();
+            return;
+        }
+
+        // DXGI_ERROR_DEVICE_REMOVED: the GPU was reset and this video output is dead.
+        if (message.Contains("887A0005", StringComparison.OrdinalIgnoreCase))
+            _tuner?.NotifyVideoDeviceLost();
+        CheckPictureFeatureLog(module, message);
+
+        if (e.Level < LibVLCSharp.Shared.LogLevel.Error) return;
+        var text = "libvlc " + module + ": " + message;
+        if (!_libVlcLogFilter.ShouldLog(text, Environment.TickCount64, out var repeated)) return;
+        AppLogger.Warn(repeated > 0 ? text + " (repeated " + repeated + " more times)" : text);
+    }
+
     private async Task InitializePlayerAsync()
     {
-        AppLogger.Info("Initializing LibVLC player. bufferMs=" + GetPlaybackBufferMs() + "; volume=" + _state.VolumeLevel + "; muted=" + _state.Muted);
+        AppLogger.Info("Initializing LibVLC player. bufferMs=" + GetPlaybackBufferMs() + "; volume=" + _state.VolumeLevel + "; muted=" + _state.Muted +
+            "; hardwareDecoding=" + _state.HardwareDecodingEnabled + "; livePauseBuffer=" + _state.TimeshiftEnabled);
         var buffer = GetPlaybackBufferMs();
+        var engineArgs = new List<string>
+        {
+            "--ignore-config",
+            "--input-timeshift-path=" + AppDataPaths.Temp,
+            "--input-record-path=" + GetDefaultRecordingFolder(),
+            "--no-video-title-show",
+            "--embedded-video",
+            "--freetype-background-color=0x000000",
+            "--freetype-background-opacity=" + (_state.SubtitleBackgroundEnabled ? "128" : "0"),
+            // "any" lets LibVLC pick D3D11VA/DXVA2 and fall back to software per stream.
+            "--avcodec-hw=" + (_state.HardwareDecodingEnabled ? "any" : "none"),
+            "--network-caching=" + buffer,
+            "--live-caching=" + buffer,
+            "--file-caching=" + buffer,
+            "--http-reconnect"
+        };
+        _libVlcArgs = engineArgs.ToArray();
         var initializedVlc = await Task.Run(() =>
         {
             VlcRuntime.Initialize();
-            return new LibVLC(
-                "--ignore-config",
-                "--input-timeshift-path=" + AppDataPaths.Temp,
-                "--input-record-path=" + GetDefaultRecordingFolder(),
-                "--no-video-title-show",
-                "--embedded-video",
-                "--avcodec-hw=none",
-                "--network-caching=" + buffer,
-                "--live-caching=" + buffer,
-                "--file-caching=" + buffer,
-                "--http-reconnect");
+            return new LibVLC(_libVlcArgs);
         });
         if (_isShuttingDown)
         {
@@ -509,14 +564,14 @@ public partial class MainWindow : Window
             return;
         }
         _libVlc = initializedVlc;
+        _availableVideoFilters = new HashSet<string>(
+            _libVlc.VideoFilters.Select(filter => filter.Name ?? string.Empty), StringComparer.OrdinalIgnoreCase);
+        AppLogger.Info("Picture filters available: " +
+            string.Join(",", PictureEnhancementOptions.CpuFilterModules.Where(_availableVideoFilters.Contains)));
 
         // Record native player errors (HTTP status, demux failures, ...) so failed
         // tune attempts in the app log show the server's actual refusal reason.
-        _libVlc.Log += (_, e) =>
-        {
-            if (e.Level < LibVLCSharp.Shared.LogLevel.Error) return;
-            AppLogger.Warn("libvlc " + (e.Module ?? "core") + ": " + e.Message);
-        };
+        _libVlc.Log += OnLibVlcLog;
 
         _tuner = new ChannelTuner(_libVlc) { MaxAttempts = GetReconnectAttempts(), TimeshiftEnabled = _state.TimeshiftEnabled };
         if (_state.TimeshiftSeconds is not (30 or 60 or 90 or 120)) _state.TimeshiftSeconds = 30;
@@ -524,7 +579,26 @@ public partial class MainWindow : Window
         _tuner.PlayerAttached += OnTunerPlayerAttached;
         _tuner.ActiveMediaChanged += OnTunerActiveMediaChanged;
         _tuner.PlayerDetaching += OnTunerPlayerDetaching;
+        _tuner.PlayerStopping += OnTunerPlayerStopping;
+        _tuner.PlayerAbandoning += OnTunerPlayerAbandoning;
         _tuner.StateChanged += OnTunerStateChanged;
+        _tuner.VideoAdjustmentsSuspended += request => Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (_isShuttingDown || !_playbackState.Accepts(request)) return;
+            StatusText.Text = "Video adjustments turned off for this channel: the picture could not keep up with them. Reset them in Settings > Video adjustments.";
+        }));
+        _tuner.UltraHdTooDemanding += request => Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (_isShuttingDown || !_playbackState.Accepts(request)) return;
+            StatusText.Text = "This 4K/UHD channel is too demanding for this PC: the picture cannot keep up. Try the channel's HD (1080p) version.";
+        }));
+        _tuner.PictureEnhancementsSuspended += request => Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (_isShuttingDown || !_playbackState.Accepts(request)) return;
+            StatusText.Text = "Picture enhancements turned off for this channel: this PC could not keep up. Change them in the Picture menu.";
+        }));
+
+        await ApplyPictureSettingsAsync(restartStream: false);
         _positionTimer.Start();
             InitializeRecordingService();
         RefreshSubtitleTracks();
@@ -765,22 +839,28 @@ public partial class MainWindow : Window
 
     private void InitializeVideoSurface()
     {
-        VideoViewHost.Child = _videoView;
-        _videoView.MouseDown += (_, e) => Dispatcher.BeginInvoke(new Action(() =>
+        _videoPanel.Controls.Add(_videoView);
+        VideoViewHost.Child = _videoPanel;
+        WireVideoView(_videoView);
+    }
+
+    private void WireVideoView(LibVLCSharp.WinForms.VideoView view)
+    {
+        view.MouseDown += (_, e) => Dispatcher.BeginInvoke(new Action(() =>
         {
             if (e.Button != System.Windows.Forms.MouseButtons.Left) return;
             if (e.Clicks >= 2) ToggleFullScreen();
             else ShowControls();
         }));
-        _videoView.MouseUp += (_, e) => Dispatcher.BeginInvoke(new Action(() =>
+        view.MouseUp += (_, e) => Dispatcher.BeginInvoke(new Action(() =>
         {
             if (e.Button == System.Windows.Forms.MouseButtons.Right) ShowVideoContextMenu();
         }));
-        _videoView.MouseMove += (_, _) => Dispatcher.BeginInvoke(new Action(HandlePointerMovement));
-        _videoView.MouseWheel += (_, e) => Dispatcher.BeginInvoke(new Action(() => ApplyVolumeWheel(e.Delta)));
-        _videoView.GotFocus += (_, _) => Dispatcher.BeginInvoke(new Action(() => Focus()));
-        _videoView.HandleCreated += (_, _) => AppLogger.Info("Video surface handle created. hwnd=0x" + _videoView.Handle.ToInt64().ToString("X"));
-        _videoView.HandleDestroyed += (_, _) =>
+        view.MouseMove += (_, _) => Dispatcher.BeginInvoke(new Action(HandlePointerMovement));
+        view.MouseWheel += (_, e) => Dispatcher.BeginInvoke(new Action(() => ApplyVolumeWheel(e.Delta)));
+        view.GotFocus += (_, _) => Dispatcher.BeginInvoke(new Action(() => Focus()));
+        view.HandleCreated += (_, _) => AppLogger.Info("Video surface handle created. hwnd=0x" + view.Handle.ToInt64().ToString("X"));
+        view.HandleDestroyed += (_, _) =>
         {
             if (_isShuttingDown || _mediaPlayer is null) return;
             AppLogger.Warn("Video surface handle was destroyed during playback; stopping to prevent a fallback output window.");
@@ -802,6 +882,7 @@ public partial class MainWindow : Window
             if (!ReferenceEquals(player, _tuner?.CurrentPlayer)) return;
             _mediaPlayer = player;
             _currentMedia = media;
+            _stoppingPlayer = null;
             _preferredAudioApplied = false;
             _preferredSubtitleApplied = false;
 
@@ -857,6 +938,59 @@ public partial class MainWindow : Window
         }
     }
 
+    // Called on the tuner worker thread just before it stops a player it is retiring.
+    // LibVLC's Stop can wait for the video output, which needs this UI thread. If the
+    // UI thread were inside a call to the same player at that moment (the 500 ms
+    // position timer reads it), both would wait forever: Windows reports
+    // "Application Hang, cross-thread". Drop every UI reference except the video view
+    // binding, which must stay until Stop finishes (see ReleaseAttemptAsync).
+    // The tuner gave up on a player LibVLC could not stop. Its video output is still
+    // alive inside the current surface. Clearing that surface's player would make
+    // LibVLC open a stray top-level window, so keep the surface (hidden, bound to the
+    // stuck player) and give the next player a brand-new one.
+    private void OnTunerPlayerAbandoning(MediaPlayer player)
+    {
+        if (_isShuttingDown) return;
+        try
+        {
+            Dispatcher.Invoke(() =>
+            {
+                if (_isShuttingDown || !ReferenceEquals(_videoView.MediaPlayer, player)) return;
+                var parked = _videoView;
+                _videoView = CreateVideoView();
+                WireVideoView(_videoView);
+                _videoPanel.Controls.Add(_videoView);
+                _videoView.BringToFront();
+                parked.Visible = false;
+                _parkedVideoViews.Add(parked);
+                AppLogger.Warn("Video surface kept for the stuck player; the next channel uses a new surface.");
+            });
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn("Player abandoning handler failed. " + AppLogger.SanitizeText(ex.Message));
+        }
+    }
+
+    private void OnTunerPlayerStopping(MediaPlayer player)
+    {
+        if (_isShuttingDown) return;
+        try
+        {
+            Dispatcher.Invoke(() =>
+            {
+                if (_isShuttingDown || !ReferenceEquals(_mediaPlayer, player)) return;
+                _stoppingPlayer = player;
+                _mediaPlayer = null;
+                _currentMedia = null;
+            });
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn("Player stopping handler failed. " + AppLogger.SanitizeText(ex.Message));
+        }
+    }
+
     // A timeshift cursor replaces only the active Media input, not the player.
     // Update the UI's ownership reference synchronously before the tuner retires
     // the previous Media instance.
@@ -902,7 +1036,8 @@ public partial class MainWindow : Window
         }));
         player.Stopped += (_, _) => Dispatcher.BeginInvoke(new Action(() =>
         {
-            if (!ReferenceEquals(player, _mediaPlayer)) return;
+            var stoppedWhileRetiring = ReferenceEquals(player, _stoppingPlayer) && _mediaPlayer is null;
+            if (!ReferenceEquals(player, _mediaPlayer) && !stoppedWhileRetiring) return;
             PlayPauseButton.Content = IconFactory.Create(IconFactory.Play);
             if (_mediaPlayer?.IsPlaying != true) ShowIdleBackground();
         }));
@@ -3242,6 +3377,8 @@ public partial class MainWindow : Window
         }
 
         menu.Items.Add(new Separator());
+        if (ReferenceEquals(menu, SubtitleMenu)) menu.Items.Add(SubtitleBackgroundMenuItem);
+        if (ReferenceEquals(menu, SubtitleMenu)) menu.Items.Add(new Separator());
         var addItem = new WpfMenuItem
         {
             Header = "Add SRT...",
@@ -3556,7 +3693,9 @@ public partial class MainWindow : Window
 
     private void ToggleDiagnostics_Click(object sender, RoutedEventArgs e)
     {
-        StreamInfoText.Visibility = sender is WpfMenuItem { IsChecked: true } ? Visibility.Visible : Visibility.Collapsed;
+        _state.ShowDiagnostics = ShowDiagnosticsMenuItem.IsChecked;
+        StreamInfoText.Visibility = _state.ShowDiagnostics ? Visibility.Visible : Visibility.Collapsed;
+        _store.Save(_state);
     }
 
     private void MorePlayback_Click(object sender, RoutedEventArgs e)
@@ -3827,6 +3966,13 @@ public partial class MainWindow : Window
         ControlsBar.BorderThickness = new Thickness(1, 1, 1, 0);
         ControlsBar.Margin = new Thickness(0);
         FullScreenControlsPopup.Child = ControlsBar;
+    }
+
+    private void SubtitleBackgroundMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        _state.SubtitleBackgroundEnabled = SubtitleBackgroundMenuItem.IsChecked;
+        _store.Save(_state);
+        StatusText.Text = "Subtitle background " + (_state.SubtitleBackgroundEnabled ? "enabled" : "disabled") + ". Restart the player to apply.";
     }
 
     private void ToggleDarkMode_Click(object sender, RoutedEventArgs e)
@@ -5516,7 +5662,10 @@ public partial class MainWindow : Window
             _tuner?.Dispose();
             _mediaPlayer = null;
             _currentMedia = null;
-            _libVlc?.Dispose();
+            try { _libVlc?.Dispose(); }
+            catch { }
+            try { _filteredLibVlc?.Dispose(); }
+            catch { }
         }
         catch
         {
