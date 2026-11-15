@@ -5,6 +5,8 @@ artifacts/
 release/**/accounts.json
 release/**/logs/
 release/**/logs/**
+# Local crash/runtime logs copied in for debugging; never committed.
+error logs/
 .vs/
 *.user
 *.suo
